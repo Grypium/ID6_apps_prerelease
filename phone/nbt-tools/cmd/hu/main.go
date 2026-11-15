@@ -24,6 +24,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	// Piped input (e.g. a file to write with "cat > path") goes to the remote command.
+	if st, err := os.Stdin.Stat(); err == nil && st.Mode()&os.ModeCharDevice == 0 {
+		s.Stdin = os.Stdin
+	}
 	out, err := s.CombinedOutput(os.Args[1])
 	os.Stdout.Write(out)
 	if err != nil {

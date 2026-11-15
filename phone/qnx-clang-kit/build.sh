@@ -57,6 +57,10 @@ worker boostdeck-collector-qnx "-DNATIVE_FAST -DPERF_LAB" "-DPERF_LAB"
 worker mhd-maps-qnx "-DMHD_MAPS_ONLY" ""
 worker shift-deck-qnx "-DNATIVE_FAST -DSHIFT_DECK_ONLY" "-DPERF_LAB"
 [ -f "$SRC/src/fault_scan.c" ] && worker fault-codes-qnx "-DFAULT_SCAN_ONLY" ""
+# Shared read-only diagnostic hub; installed as both boostdeck-collector-qnx and
+# shift-deck-qnx for the official plugins, so gauge_core is built without
+# PERF_LAB (NBG3 frames, which the official BoostDeck plugin parses).
+[ -f "$SRC/src/diag_hub.c" ] && worker diag-hub-qnx "-DDIAG_HUB" ""
 
 # File-operations helper (official build is static; this one links libc dynamically)
 CC -fno-pic -c "$SRC/fileops.c" -o "$O/fileops.o"

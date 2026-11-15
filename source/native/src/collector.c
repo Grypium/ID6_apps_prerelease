@@ -113,6 +113,8 @@ static unsigned number(const char *s, unsigned lo, unsigned hi) {
 #include "controls.c"
 #elif defined(FAULT_SCAN_ONLY)
 #include "fault_scan.c"
+#elif defined(DIAG_HUB)
+#include "diag_hub.c"
 #elif defined(ENGINE_CODES_ONLY)
 static void fault_codes(int fd, int clear) {
     /* Fault, pending, confirmed, failed since clear, or warning requested.

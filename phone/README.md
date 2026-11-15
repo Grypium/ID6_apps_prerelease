@@ -172,6 +172,29 @@ The plugin shows four codes per page (Next page on screen or in Options):
 code + module, and status + description from `dme_descriptions.h`. Shadow codes
 are labelled "Shadow".
 
+## Shared diagnostic hub (replaces BoostDeck's and ShiftDeck's workers)
+
+The official workers each poll the DME on their own (about 40 requests a second
+together in a simulation of the old source) and BoostDeck's keeps the shared lock. `diag-hub-qnx`
+(`source/native/src/diag_hub.c`, `-DDIAG_HUB`) is one read-only worker installed under
+both worker names, so the official plugins are unchanged:
+
+- one gateway connection for both apps; the second instance only sends heartbeats
+- read services only (22, OBD 01), one request in flight, at least 40 ms apart,
+  several values per request (about 18 requests a second with both apps open)
+- hands the lock to one-shot tools (fault scan, map switch) within ~50 ms, then
+  stays off for 3 s
+- reads the DME session (22 F186) every 2 s; a non-default session means another
+  tester (MHD, ISTA) is working, so it disconnects and sends nothing for 30 s
+- exits with its plugin, which stops it when the gauge screen is hidden
+
+```sh
+make -C source/native build/diag-hub && python3 source/native/tests/test_diag_hub.py
+python3 phone/hub/probe.py          # read-only check on the car, through the relay
+NBT_PW='<root password>' phone/hub/swap.sh       # originals go to ID5/Removed-<ts>/
+NBT_PW='<root password>' phone/hub/restore.sh <ts>
+```
+
 ## Tips and gotchas
 
 - QNX's shell on the head unit has no `printf`, `head` or `which`; use `print -r --`.

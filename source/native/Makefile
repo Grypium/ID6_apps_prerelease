@@ -21,10 +21,14 @@ build/shift-deck: src/collector.c $(CORE) $(HEADERS) | build
 build/mhd-maps: src/collector.c $(CORE) $(HEADERS) | build
 	$(CC) $(CFLAGS) -Isrc -DMHD_MAPS_ONLY $(filter %.c,$^) -lm -o $@
 
+build/diag-hub: src/collector.c src/diag_hub.c $(CORE) $(HEADERS) | build
+	$(CC) $(CFLAGS) -Isrc -DDIAG_HUB $(filter %collector.c,$^) $(CORE) -lm -o $@
+
 build/test-core: tests/test_core.c $(CORE) $(HEADERS) | build
 	$(CC) $(CFLAGS) -Isrc $(filter %.c,$^) -lm -o $@
 
-test: build/boostdeck-collector build/shift-deck build/mhd-maps build/test-core
+test: build/boostdeck-collector build/shift-deck build/mhd-maps build/test-core build/diag-hub
 	./build/test-core
 	$(PYTHON) -B tests/test_transport.py
 	$(PYTHON) -B tests/test_drive_apps.py
+	$(PYTHON) -B tests/test_diag_hub.py
