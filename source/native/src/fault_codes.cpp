@@ -199,6 +199,7 @@ class FaultCodes : public bmw::PluginApp {
             updateModel(91u + i, bmw::BasicString<char>(""));
         }
         for (unsigned i = 0; i < 4u * kPageSize; ++i) updateModel(60u + i, bmw::BasicString<char>(""));
+        for (unsigned i = 0; i < kPageSize; ++i) showRow(i, false);
     }
     void startScan();
     void pollScan();
@@ -251,15 +252,17 @@ public:
         if (fd_ < 0 && size_ && page_ > 0) { --page_; render(); }
         return true;
     }
-    // Previous only after the first page, Next only before the last one,
-    // on both the list and the details page.
+    // Previous only after the first page, Next only before the last one.
     void showPaging() {
         bmw::Parcel previous(fd_ < 0 && size_ && page_ > 0);
         bmw::Parcel next(fd_ < 0 && size_ && page_ + 1 < pages_);
         setProperty(314u, 3u, previous);
-        setProperty(420u, 3u, previous);
         setProperty(311u, 3u, next);
-        setProperty(421u, 3u, next);
+    }
+    // A row can be selected only when it holds a code.
+    void showRow(unsigned i, bool used) {
+        bmw::Parcel visible(used);
+        setProperty(341u + i, 3u, visible);
     }
 };
 
@@ -344,6 +347,7 @@ void FaultCodes::render() {
         char detail[4][96];
         detail_lines(line, n, detail);
         for (unsigned k = 0; k < 4; ++k) updateModel(60u + 4u * i + k, bmw::BasicString<char>(detail[k]));
+        showRow(i, n == 12);
         line = end ? end + 1 : "";
     }
     showPaging();

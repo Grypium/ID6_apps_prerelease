@@ -8,7 +8,10 @@
     </entryButton>
     <actions>
       <hmiAction id="10" target="101" />
-      <hmiAction id="31" target="102" />
+      <hmiAction id="32" target="103" />
+      <hmiAction id="33" target="104" />
+      <hmiAction id="34" target="105" />
+      <hmiAction id="35" target="106" />
       <raAction id="23" />
       <raAction id="29" />
       <raAction id="30" />
@@ -45,6 +48,7 @@
       <hmiState id="101" text="Fault Codes">
         <optionComponents>
           <button id="312" action="29" text="Next page" />
+          <button id="313" action="30" text="Previous page" />
         </optionComponents>
         <components>
           <image id="328" model="95">
@@ -65,69 +69,39 @@
               <property id="10" value="55" />
             </properties>
           </label>
-          <label id="321" model="81">
+          <button id="341" model="81" action="32" text="Code 1">
             <properties>
               <property id="20" value="62" />
               <property id="21" value="83" />
               <property id="9" value="255" />
               <property id="10" value="55" />
+              <property id="3" value="false" />
             </properties>
-          </label>
-          <label id="322" model="82">
+          </button>
+          <button id="342" model="82" action="33" text="Code 2">
             <properties>
               <property id="20" value="62" />
               <property id="21" value="150" />
               <property id="9" value="255" />
               <property id="10" value="55" />
+              <property id="3" value="false" />
             </properties>
-          </label>
-          <label id="323" model="83">
+          </button>
+          <button id="343" model="83" action="34" text="Code 3">
             <properties>
               <property id="20" value="62" />
               <property id="21" value="217" />
               <property id="9" value="255" />
               <property id="10" value="55" />
+              <property id="3" value="false" />
             </properties>
-          </label>
-          <label id="324" model="84">
+          </button>
+          <button id="344" model="84" action="35" text="Code 4">
             <properties>
               <property id="20" value="62" />
               <property id="21" value="284" />
               <property id="9" value="255" />
               <property id="10" value="55" />
-            </properties>
-          </label>
-          <button id="310" action="23" text="Read fault codes">
-            <properties>
-              <property id="20" value="49" />
-              <property id="21" value="370" />
-              <property id="9" value="262" />
-              <property id="10" value="52" />
-            </properties>
-          </button>
-          <button id="315" action="31" text="Details">
-            <properties>
-              <property id="20" value="321" />
-              <property id="21" value="370" />
-              <property id="9" value="262" />
-              <property id="10" value="52" />
-            </properties>
-          </button>
-          <button id="314" action="30" text="Previous page">
-            <properties>
-              <property id="20" value="593" />
-              <property id="21" value="370" />
-              <property id="9" value="262" />
-              <property id="10" value="52" />
-              <property id="3" value="false" />
-            </properties>
-          </button>
-          <button id="311" action="29" text="Next page">
-            <properties>
-              <property id="20" value="865" />
-              <property id="21" value="370" />
-              <property id="9" value="262" />
-              <property id="10" value="52" />
               <property id="3" value="false" />
             </properties>
           </button>
@@ -163,37 +137,216 @@
               <property id="10" value="58" />
             </properties>
           </label>
+          <button id="310" action="23" text="Read fault codes">
+            <properties>
+              <property id="20" value="49" />
+              <property id="21" value="370" />
+              <property id="9" value="340" />
+              <property id="10" value="52" />
+            </properties>
+          </button>
+          <button id="314" action="30" text="Previous page">
+            <properties>
+              <property id="20" value="409" />
+              <property id="21" value="370" />
+              <property id="9" value="340" />
+              <property id="10" value="52" />
+              <property id="3" value="false" />
+            </properties>
+          </button>
+          <button id="311" action="29" text="Next page">
+            <properties>
+              <property id="20" value="769" />
+              <property id="21" value="370" />
+              <property id="9" value="340" />
+              <property id="10" value="52" />
+              <property id="3" value="false" />
+            </properties>
+          </button>
         </components>
       </hmiState>
-      <hmiState id="102" parentId="101" text="Fault code details">
+      <hmiState id="103" parentId="101" text="Fault code details">
         <components>
-          <label id="400" model="80" />
-          <label id="401" model="60" />
-          <label id="402" model="61" />
-          <label id="403" model="62" />
-          <label id="404" model="63" />
-          <label id="405" model="64" />
-          <label id="406" model="65" />
-          <label id="407" model="66" />
-          <label id="408" model="67" />
-          <label id="409" model="68" />
-          <label id="410" model="69" />
-          <label id="411" model="70" />
-          <label id="412" model="71" />
-          <label id="413" model="72" />
-          <label id="414" model="73" />
-          <label id="415" model="74" />
-          <label id="416" model="75" />
-          <button id="420" action="30" text="Previous page">
+          <image id="510" model="95">
             <properties>
-              <property id="3" value="false" />
+              <property id="20" value="36" />
+              <property id="21" value="9" />
+              <property id="9" value="1120" />
+              <property id="10" value="352" />
+              <property id="2" value="false" />
+              <property id="3" value="true" />
             </properties>
-          </button>
-          <button id="421" action="29" text="Next page">
+          </image>
+          <label id="511" model="60">
             <properties>
-              <property id="3" value="false" />
+              <property id="20" value="58" />
+              <property id="21" value="20" />
+              <property id="9" value="1067" />
+              <property id="10" value="58" />
             </properties>
-          </button>
+          </label>
+          <label id="512" model="61">
+            <properties>
+              <property id="20" value="58" />
+              <property id="21" value="110" />
+              <property id="9" value="1067" />
+              <property id="10" value="58" />
+            </properties>
+          </label>
+          <label id="513" model="62">
+            <properties>
+              <property id="20" value="58" />
+              <property id="21" value="200" />
+              <property id="9" value="1067" />
+              <property id="10" value="58" />
+            </properties>
+          </label>
+          <label id="514" model="63">
+            <properties>
+              <property id="20" value="58" />
+              <property id="21" value="265" />
+              <property id="9" value="1067" />
+              <property id="10" value="58" />
+            </properties>
+          </label>
+        </components>
+      </hmiState>
+      <hmiState id="104" parentId="101" text="Fault code details">
+        <components>
+          <image id="520" model="95">
+            <properties>
+              <property id="20" value="36" />
+              <property id="21" value="9" />
+              <property id="9" value="1120" />
+              <property id="10" value="352" />
+              <property id="2" value="false" />
+              <property id="3" value="true" />
+            </properties>
+          </image>
+          <label id="521" model="64">
+            <properties>
+              <property id="20" value="58" />
+              <property id="21" value="20" />
+              <property id="9" value="1067" />
+              <property id="10" value="58" />
+            </properties>
+          </label>
+          <label id="522" model="65">
+            <properties>
+              <property id="20" value="58" />
+              <property id="21" value="110" />
+              <property id="9" value="1067" />
+              <property id="10" value="58" />
+            </properties>
+          </label>
+          <label id="523" model="66">
+            <properties>
+              <property id="20" value="58" />
+              <property id="21" value="200" />
+              <property id="9" value="1067" />
+              <property id="10" value="58" />
+            </properties>
+          </label>
+          <label id="524" model="67">
+            <properties>
+              <property id="20" value="58" />
+              <property id="21" value="265" />
+              <property id="9" value="1067" />
+              <property id="10" value="58" />
+            </properties>
+          </label>
+        </components>
+      </hmiState>
+      <hmiState id="105" parentId="101" text="Fault code details">
+        <components>
+          <image id="530" model="95">
+            <properties>
+              <property id="20" value="36" />
+              <property id="21" value="9" />
+              <property id="9" value="1120" />
+              <property id="10" value="352" />
+              <property id="2" value="false" />
+              <property id="3" value="true" />
+            </properties>
+          </image>
+          <label id="531" model="68">
+            <properties>
+              <property id="20" value="58" />
+              <property id="21" value="20" />
+              <property id="9" value="1067" />
+              <property id="10" value="58" />
+            </properties>
+          </label>
+          <label id="532" model="69">
+            <properties>
+              <property id="20" value="58" />
+              <property id="21" value="110" />
+              <property id="9" value="1067" />
+              <property id="10" value="58" />
+            </properties>
+          </label>
+          <label id="533" model="70">
+            <properties>
+              <property id="20" value="58" />
+              <property id="21" value="200" />
+              <property id="9" value="1067" />
+              <property id="10" value="58" />
+            </properties>
+          </label>
+          <label id="534" model="71">
+            <properties>
+              <property id="20" value="58" />
+              <property id="21" value="265" />
+              <property id="9" value="1067" />
+              <property id="10" value="58" />
+            </properties>
+          </label>
+        </components>
+      </hmiState>
+      <hmiState id="106" parentId="101" text="Fault code details">
+        <components>
+          <image id="540" model="95">
+            <properties>
+              <property id="20" value="36" />
+              <property id="21" value="9" />
+              <property id="9" value="1120" />
+              <property id="10" value="352" />
+              <property id="2" value="false" />
+              <property id="3" value="true" />
+            </properties>
+          </image>
+          <label id="541" model="72">
+            <properties>
+              <property id="20" value="58" />
+              <property id="21" value="20" />
+              <property id="9" value="1067" />
+              <property id="10" value="58" />
+            </properties>
+          </label>
+          <label id="542" model="73">
+            <properties>
+              <property id="20" value="58" />
+              <property id="21" value="110" />
+              <property id="9" value="1067" />
+              <property id="10" value="58" />
+            </properties>
+          </label>
+          <label id="543" model="74">
+            <properties>
+              <property id="20" value="58" />
+              <property id="21" value="200" />
+              <property id="9" value="1067" />
+              <property id="10" value="58" />
+            </properties>
+          </label>
+          <label id="544" model="75">
+            <properties>
+              <property id="20" value="58" />
+              <property id="21" value="265" />
+              <property id="9" value="1067" />
+              <property id="10" value="58" />
+            </properties>
+          </label>
         </components>
       </hmiState>
     </hmiStates>
