@@ -87,6 +87,14 @@
               <property id="10" value="52" />
             </properties>
           </button>
+          <button id="311" action="29" text="Next page">
+            <properties>
+              <property id="20" value="531" />
+              <property id="21" value="370" />
+              <property id="9" value="460" />
+              <property id="10" value="52" />
+            </properties>
+          </button>
           <label id="330" model="91">
             <properties>
               <property id="20" value="326" />

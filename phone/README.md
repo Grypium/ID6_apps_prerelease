@@ -157,18 +157,20 @@ Nothing is deleted on the car: added items are moved to `ID5/Removed-<timestamp>
 
 ## FaultCodes: how it works
 
-`fault-codes-qnx` (`source/native/src/fault_scan.c`, built from `collector.c` with
-`-DFAULT_SCAN_ONLY`) sends **one** functional UDS request, `19 02 AF`
-(ReadDTCInformation, report by status mask), to address `0xDF` through the gateway
-over HSFZ. Every module answers from its own address within ~5 s (26 modules on the
-test car). A code is listed only if its status has a real failure bit
-(`0x2F`: failed, failed this cycle, pending, confirmed, failed since clear); entries
-with only "test not completed" or only the warning-lamp bit are ignored. Nothing is
-written or cleared.
+It shows the engine view a tuning tool shows: the DME's fault memory and its
+shadow memory, nothing from other modules. `fault-codes-qnx`
+(`source/native/src/fault_scan.c`, built from `collector.c` with `-DFAULT_SCAN_ONLY`)
+sends two read-only physical requests to the DME (0x12) through the gateway over HSFZ:
 
-The plugin shows four codes per page: code + module, and status + description.
-Engine (DME, address 0x12) codes get descriptions from `dme_descriptions.h`; other
-modules show their name for common F-series addresses, or the raw address.
+- `19 02 0C`: ReadDTCInformation, pending + confirmed codes (fault memory)
+- `22 20 00`: ReadDataByIdentifier 0x2000, BMW's shadow memory (de-duplicated)
+
+It uses its own tester address (0xF5) so its replies are not mixed with the gauge
+worker's (0xF4), and retries if the DME is busy. Nothing is written or cleared.
+
+The plugin shows four codes per page (Next page on screen or in Options):
+code + module, and status + description from `dme_descriptions.h`. Shadow codes
+are labelled "Shadow".
 
 ## Tips and gotchas
 

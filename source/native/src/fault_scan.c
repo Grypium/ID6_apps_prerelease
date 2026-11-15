@@ -1,19 +1,20 @@
 /* fault_scan.c - included by collector.c when built with -DFAULT_SCAN_ONLY.
  *
- * Read-only fault memory scan of every module. One functional (broadcast)
- * UDS ReadDTCInformation request (19 02) goes to address 0xDF through the
- * diagnostic gateway; each module answers from its own address. Nothing is
- * written or cleared.
+ * Read-only engine (DME) fault scan, the same view a tuning tool gives:
+ *   - fault memory:  ReadDTCInformation 19 02 0C (pending + confirmed codes)
+ *   - shadow memory: ReadDataByIdentifier 22 2000 (BMW dtcShadowMemory),
+ *     records of 3-byte code + status, de-duplicated
+ * Only the DME (0x12) is asked, with physical requests. Nothing is written
+ * or cleared.
  *
  * Output (stdout, read by the FaultCodes plugin):
  *   line 1: a summary sentence
- *   then one "EE CCCCCC SS" line per fault: module address, 3-byte code,
- *   raw status byte.
+ *   then "12 CCCCCC SS" per fault-memory code and "SH CCCCCC SS" per shadow
+ *   code (code, raw status byte).
  */
 enum {
-    scan_status = 0xaf, /* failed, this cycle, pending, confirmed, since clear, lamp */
-    fault_bits = 0x2f,  /* counts only with a real failure bit; lamp bit alone is not a fault */
-    max_modules = 64,
+    dme = 0x12,
+    fault_mask = 0x0c, /* pending + confirmed, as BMW's own fault reads use */
     max_lines = 120,
     /* Our own tester address. The gauge workers use 0xF4 and the gateway
      * delivers replies by tester address, so sharing 0xF4 would mix their
@@ -21,120 +22,98 @@ enum {
     tester = 0xf5
 };
 
-static unsigned faults, shown;
+static unsigned shown;
 static char lines[max_lines][16];
 
-/* reply = 59 02 <availability> then 4-byte records (3-byte code + status). */
-static void add_codes(unsigned ecu, const unsigned char *reply, unsigned n) {
-    unsigned i;
-    for (i = 3; i + 4 <= n; i += 4) {
-        unsigned status = reply[i+3] & reply[2]; /* only bits the module supports */
-        if (!(status & fault_bits)) continue;
-        ++faults;
-        if (shown < max_lines) {
-            snprintf(lines[shown], sizeof lines[shown], "%02X %02X%02X%02X %02X",
-                     ecu, reply[i], reply[i+1], reply[i+2], reply[i+3]);
-            ++shown;
-        }
-    }
-}
-
-/* Modules worth a direct (physical) request if they missed the broadcast:
- * engine and transmission, which the gauge apps keep busy. */
-static const unsigned char must_ask[] = {0x12, 0x18};
-
-/* Physical 19 02 request to one module; returns the reply length (59 02 ...) or -1. */
-static int ask_module(int fd, unsigned ecu, unsigned char *body, unsigned size) {
-    unsigned char request[] = {0,0,0,5,0,1,tester,0,0x19,0x02,scan_status}, header[6];
+/* One physical request to `ecu`; returns the positive reply length (starting
+ * at the response SID) or -1. Waits through "response pending" (7F xx 78). */
+static int ask(int fd, unsigned ecu, const unsigned char *uds, unsigned uds_len,
+               unsigned char *body, unsigned size) {
+    unsigned char request[16], header[6];
     uint64_t deadline = bd_mono_ms() + 2500;
-    request[7] = (unsigned char)ecu;
-    if (!transfer(fd, request, sizeof request, 1, deadline)) return -1;
+    unsigned i;
+    if (uds_len > sizeof request - 8) return -1;
+    request[0] = request[1] = 0;
+    request[2] = (unsigned char)((uds_len + 2) >> 8);
+    request[3] = (unsigned char)(uds_len + 2);
+    request[4] = 0; request[5] = 1;
+    request[6] = tester; request[7] = (unsigned char)ecu;
+    for (i = 0; i < uds_len; ++i) request[8 + i] = uds[i];
+    if (!transfer(fd, request, 8 + uds_len, 1, deadline)) return -1;
     while (running) {
-        uint32_t len;
+        uint32_t len, k;
         unsigned ctrl;
         if (!transfer(fd, header, 6, 0, deadline)) return -1;
         len = ((uint32_t)header[0]<<24)|((uint32_t)header[1]<<16)|((uint32_t)header[2]<<8)|header[3];
         ctrl = ((unsigned)header[4]<<8)|header[5];
         if (len > size || !transfer(fd, body, len, 0, deadline)) return -1;
-        if (ctrl == 0x12) {
-            unsigned char alive[8] = {0,0,0,2,0,0x13,0,tester};
-            if (!transfer(fd, alive, 8, 1, deadline)) return -1;
-            continue;
-        }
-        if (ctrl != 1 || len < 5 || body[0] != ecu || body[1] != tester) continue;
-        if (body[2] == 0x7f) {
-            if (body[4] == 0x78) { deadline = bd_mono_ms() + 2500; continue; }
-            return -1;
-        }
-        if (body[2] != 0x59 || body[3] != 0x02) continue;
-        { uint32_t k; for (k = 2; k < len; ++k) body[k-2] = body[k]; }
-        return (int)(len - 2);
-    }
-    return -1;
-}
-
-static int scan_faults(int fd) {
-    unsigned char request[] = {0,0,0,5,0,1,tester,0xdf,0x19,0x02,scan_status};
-    static unsigned char body[4096], seen[256];
-    unsigned char header[6];
-    unsigned modules = 0, pending = 0, i;
-    uint64_t deadline, quiet;
-
-    if (!transfer(fd, request, sizeof request, 1, bd_mono_ms() + 1000)) return -1;
-    deadline = bd_mono_ms() + 12000; /* hard cap for the whole scan */
-    quiet = bd_mono_ms() + 6000;     /* finish once nothing new arrives for a while */
-    while (running) {
-        uint64_t now = bd_mono_ms(), until = quiet < deadline ? quiet : deadline;
-        uint32_t len;
-        unsigned ctrl;
-        if (now >= deadline || (now >= until && !pending)) break;
-        if (!transfer(fd, header, 6, 0, pending ? deadline : until)) break;
-        len = ((uint32_t)header[0]<<24)|((uint32_t)header[1]<<16)|((uint32_t)header[2]<<8)|header[3];
-        ctrl = ((unsigned)header[4]<<8)|header[5];
-        if (len > sizeof body || !transfer(fd, body, len, 0, deadline)) return -1;
         if (ctrl == 0x12) { /* gateway alive check */
             unsigned char alive[8] = {0,0,0,2,0,0x13,0,tester};
             if (!transfer(fd, alive, 8, 1, deadline)) return -1;
             continue;
         }
-        if (ctrl != 1 || len < 3 || body[1] != tester) continue;
-        if (len == 5 && body[2] == 0x7f && body[3] == 0x19) {
-            /* 0x78 = response pending: that module will answer later */
-            if (body[4] == 0x78 && !(seen[body[0]] & 3)) { seen[body[0]] |= 2; ++pending; }
-            quiet = bd_mono_ms() + 4000;
+        if (ctrl != 1 || len < 3 || body[0] != ecu || body[1] != tester) continue;
+        if (body[2] == 0x7f) {
+            if (len >= 5 && body[3] == uds[0] && body[4] == 0x78) {
+                deadline = bd_mono_ms() + 2500;
+                continue;
+            }
+            if (len >= 5 && body[3] == uds[0]) return -1;
             continue;
         }
-        if (len < 5 || body[2] != 0x59 || body[3] != 0x02 || (seen[body[0]] & 1)) continue;
-        if (seen[body[0]] & 2) { seen[body[0]] &= (unsigned char)~2u; --pending; }
-        seen[body[0]] |= 1;
-        if (++modules > max_modules) break;
-        quiet = bd_mono_ms() + 4000;
-        add_codes(body[0], body + 2, len - 2);
+        if (body[2] != (unsigned char)(uds[0] + 0x40)) continue;
+        for (k = 2; k < len; ++k) body[k-2] = body[k];
+        return (int)(len - 2);
     }
-    /* Follow up directly with modules that missed the broadcast: those that
-     * said "response pending" but never answered, and engine/transmission. */
-    for (i = 0; i < 256 && running; ++i) {
-        unsigned k, ask = (seen[i] & 3) == 2;
-        int n;
-        for (k = 0; k < sizeof must_ask; ++k)
-            if (must_ask[k] == i && !(seen[i] & 1)) ask = 1;
-        if (!ask) continue;
-        /* The engine module is often busy serving the gauge apps; give it a
-         * few tries before giving up. */
-        for (k = 0; k < 3 && running; ++k) {
-            n = ask_module(fd, i, body, sizeof body);
-            if (n >= 3) break;
-            poll(0, 0, 300);
-        }
-        if (n >= 3) {
-            seen[i] |= 1;
-            ++modules;
-            add_codes(i, body, (unsigned)n);
-        }
+    return -1;
+}
+
+/* The DME is often busy serving the gauge apps; give it a few tries. */
+static int ask_retry(int fd, const unsigned char *uds, unsigned uds_len,
+                     unsigned char *body, unsigned size) {
+    int n = -1, tries;
+    for (tries = 0; tries < 3 && running; ++tries) {
+        n = ask(fd, dme, uds, uds_len, body, size);
+        if (n >= 0) break;
+        poll(0, 0, 300);
     }
-    if (!modules) { puts("No modules answered. Is the ignition on?"); return 0; }
-    if (!faults) printf("No fault codes (%u modules checked)\n", modules);
-    else printf("%u fault %s in %u modules\n", faults, faults == 1 ? "code" : "codes", modules);
+    return n;
+}
+
+static void add_line(const char *tag, const unsigned char *r) {
+    if (shown >= max_lines) return;
+    snprintf(lines[shown], sizeof lines[shown], "%s %02X%02X%02X %02X", tag, r[0], r[1], r[2], r[3]);
+    ++shown;
+}
+
+static int scan_faults(int fd) {
+    static const unsigned char read_faults[] = {0x19, 0x02, fault_mask};
+    static const unsigned char read_shadow[] = {0x22, 0x20, 0x00};
+    static unsigned char body[4096];
+    unsigned faults = 0, shadows = 0, i, j;
+    int n;
+
+    /* 59 02 <availability> then 4-byte records. */
+    n = ask_retry(fd, read_faults, sizeof read_faults, body, sizeof body);
+    if (n < 3 || body[1] != 0x02) { puts("The engine module (DME) did not answer. Is the ignition on?"); return 0; }
+    for (i = 3; i + 4 <= (unsigned)n; i += 4)
+        if (body[i+3] & fault_mask) { add_line("12", body + i); ++faults; }
+
+    /* 62 20 00 then 4-byte records; the same code can appear more than once. */
+    n = ask_retry(fd, read_shadow, sizeof read_shadow, body, sizeof body);
+    if (n >= 3 && body[1] == 0x20 && body[2] == 0x00) {
+        for (i = 3; i + 4 <= (unsigned)n; i += 4) {
+            int repeat = 0;
+            if (!body[i] && !body[i+1] && !body[i+2]) continue;
+            for (j = 3; j < i && !repeat; j += 4)
+                repeat = body[j] == body[i] && body[j+1] == body[i+1] && body[j+2] == body[i+2];
+            if (!repeat) { add_line("SH", body + i); ++shadows; }
+        }
+        printf("Engine (DME): %u fault %s, %u shadow %s\n", faults, faults == 1 ? "code" : "codes",
+               shadows, shadows == 1 ? "code" : "codes");
+    } else {
+        printf("Engine (DME): %u fault %s (shadow memory unavailable)\n", faults, faults == 1 ? "code" : "codes");
+    }
     for (i = 0; i < shown; ++i) puts(lines[i]);
     return 0;
 }
@@ -153,18 +132,16 @@ int main(int argc, char **argv) {
         return 2;
     }
     signal(SIGINT, stop); signal(SIGTERM, stop); signal(SIGPIPE, SIG_IGN);
-    /* The gauge workers hold this lock in short leases and hand it over when
-     * asked (each failed attempt below asks), retaking it ~165 ms later.
-     * Retry quickly for a few seconds so we catch the hand-over. */
+    /* Newer gauge workers hand the shared lock over when asked (each failed
+     * attempt asks). Older BoostDeck builds hold it for good, so after a short
+     * wait carry on without it: this scan is read-only and uses its own
+     * gateway connection and tester address. */
     {
         uint64_t give_up = bd_mono_ms() + 1500;
         while ((lock = reserve_gateway()) < 0 && errno == EADDRINUSE && running &&
                bd_mono_ms() < give_up)
             poll(0, 0, 20);
     }
-    /* Older BoostDeck builds hold the lock for good and never hand it over.
-     * This scan is read-only and uses its own gateway connection (the gateway
-     * accepts several), so carry on without the lock in that case. */
     gw = connect_gw(host, port);
     if (gw < 0) puts("Diagnostic gateway unavailable");
     else if (scan_faults(gw) < 0) puts("Scan interrupted. Try again.");

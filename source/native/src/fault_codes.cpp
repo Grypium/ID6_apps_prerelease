@@ -65,16 +65,19 @@ const char* status_word(unsigned status) {
 }
 
 // "EE CCCCCC SS" -> left "CCCCCC  BRIEF", right "Status - description".
+// "SH CCCCCC SS" is an engine shadow-memory code.
 // Lines that are not in that form (worker messages) are shown as they are.
 void format_line(const char* line, int length, char* left, size_t left_size,
                  char* right, size_t right_size) {
-    unsigned ecu, code, status;
+    unsigned ecu = 0, code, status;
     right[0] = 0;
-    if (length != 12 || line[2] != ' ' || line[9] != ' ' || !parse_hex(line, 2, ecu) ||
+    bool shadow = length == 12 && line[0] == 'S' && line[1] == 'H';
+    if (length != 12 || line[2] != ' ' || line[9] != ' ' || (!shadow && !parse_hex(line, 2, ecu)) ||
         !parse_hex(line + 3, 6, code) || !parse_hex(line + 10, 2, status)) {
         snprintf(left, left_size, "%.*s", length, line);
         return;
     }
+    if (shadow) ecu = 0x12;
     const ModuleName* module = module_name(ecu);
     char brief[16];
     if (module) snprintf(brief, sizeof brief, "%s", module->brief);
@@ -86,9 +89,10 @@ void format_line(const char* line, int length, char* left, size_t left_size,
         for (unsigned i = 0; i < sizeof kDmeDescriptions / sizeof kDmeDescriptions[0]; ++i)
             if (kDmeDescriptions[i].code == code) { description = kDmeDescriptions[i].text; break; }
     }
-    if (description) snprintf(right, right_size, "%s - %s", status_word(status), description);
-    else if (module) snprintf(right, right_size, "%s - %s", status_word(status), module->full);
-    else snprintf(right, right_size, "%s - module address %02X", status_word(status), ecu);
+    const char* word = shadow ? "Shadow" : status_word(status);
+    if (description) snprintf(right, right_size, "%s - %s", word, description);
+    else if (module) snprintf(right, right_size, "%s - %s", word, module->full);
+    else snprintf(right, right_size, "%s - module address %02X", word, ecu);
 }
 
 // Gateway address written by the installer next to the worker (one line, 169.254.x.x).
@@ -172,7 +176,7 @@ public:
         size_ = 0;
         page_ = 0;
         clearRows();
-        header("Select Read fault codes (read only, about 5 seconds)");
+        header("Select Read fault codes (engine, read only)");
         return true;
     }
     virtual bool onFinalize() { stopWorker(); return true; }
@@ -219,7 +223,7 @@ void FaultCodes::startScan() {
     result_[0] = 0;
     ++generation_;
     clearRows();
-    header("Reading fault memory of all modules...");
+    header("Reading engine fault and shadow memory...");
     postPoll();
 }
 
