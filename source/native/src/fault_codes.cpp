@@ -64,6 +64,52 @@ const char* status_word(unsigned status) {
     return "Stored";
 }
 
+// Plain-language reading of a fault-memory status byte (UDS bits:
+// 0x01 failing now, 0x04 pending, 0x08 confirmed, 0x40 not tested this drive).
+void status_detail(unsigned status, char* out, size_t size) {
+    snprintf(out, size, "%s%s (%02X)",
+             (status & 0x01u) ? "Fault: failing right now" :
+             (status & 0x08u) ? "Fault: stored, not failing now" : "Fault: pending",
+             (status & 0x40u) ? ", untested this drive" : "", status);
+}
+
+// Splits text at a space so the first part is at most `width` characters.
+void wrap(const char* text, unsigned width, char* first, size_t first_size, char* rest, size_t rest_size) {
+    size_t n = strlen(text);
+    if (n <= width) { snprintf(first, first_size, "%s", text); rest[0] = 0; return; }
+    size_t cut = width;
+    while (cut > 0 && text[cut] != ' ') --cut;
+    if (!cut) cut = width;
+    snprintf(first, first_size, "%.*s", static_cast<int>(cut), text);
+    while (text[cut] == ' ') ++cut;
+    snprintf(rest, rest_size, "%s", text + cut);
+}
+
+// Full text for the details page: four lines per code.
+void detail_lines(const char* line, int length, char (*out)[96]) {
+    unsigned ecu = 0, code, status;
+    for (int k = 0; k < 4; ++k) out[k][0] = 0;
+    bool shadow = length == 12 && line[0] == 'S' && line[1] == 'H';
+    if (length != 12 || line[2] != ' ' || line[9] != ' ' || (!shadow && !parse_hex(line, 2, ecu)) ||
+        !parse_hex(line + 3, 6, code) || !parse_hex(line + 10, 2, status)) {
+        if (length > 0) snprintf(out[0], sizeof out[0], "%.*s", length, line);
+        return;
+    }
+    if (shadow) ecu = 0x12;
+    const ModuleName* module = module_name(ecu);
+    if (module) snprintf(out[0], sizeof out[0], "%06X   %s (%s)", code, module->full, module->brief);
+    else snprintf(out[0], sizeof out[0], "%06X   module address %02X", code, ecu);
+    if (shadow) snprintf(out[1], sizeof out[1], "Shadow code: logged only, no fault stored (%02X)", status);
+    else status_detail(status, out[1], sizeof out[1]);
+    const char* description = 0;
+    if (ecu == 0x12) {
+        for (unsigned i = 0; i < sizeof kDmeDescriptions / sizeof kDmeDescriptions[0]; ++i)
+            if (kDmeDescriptions[i].code == code) { description = kDmeDescriptions[i].text; break; }
+    }
+    wrap(description ? description : "No description for this code", 60,
+         out[2], sizeof out[2], out[3], sizeof out[3]);
+}
+
 // "EE CCCCCC SS" -> left "CCCCCC  BRIEF", right "Status - description".
 // "SH CCCCCC SS" is an engine shadow-memory code.
 // Lines that are not in that form (worker messages) are shown as they are.
@@ -126,6 +172,7 @@ class FaultCodes : public bmw::PluginApp {
     char result_[4096];
     size_t size_;
     unsigned page_;
+    unsigned pages_;
     unsigned generation_;
 
     void reap() {
@@ -151,6 +198,7 @@ class FaultCodes : public bmw::PluginApp {
             updateModel(81u + i, bmw::BasicString<char>(""));
             updateModel(91u + i, bmw::BasicString<char>(""));
         }
+        for (unsigned i = 0; i < 4u * kPageSize; ++i) updateModel(60u + i, bmw::BasicString<char>(""));
     }
     void startScan();
     void pollScan();
@@ -161,7 +209,7 @@ public:
                unsigned minor, bmw::RHMIInterfaceVersion version, const bmw::Bundle& config,
                const bmw::Bundle& resources)
         : PluginApp(dispatcher, name, major, minor, version, config, resources),
-          pid_(-1), fd_(-1), size_(0), page_(0), generation_(0) {}
+          pid_(-1), fd_(-1), size_(0), page_(0), pages_(1), generation_(0) {}
     virtual ~FaultCodes() { stopWorker(); }
 
     virtual bool onInit() {
@@ -173,9 +221,13 @@ public:
         addHandler(23u, action);
         action.m_exec = &Action::execImpl<FaultCodes, &FaultCodes::nextPage>;
         addHandler(29u, action);
+        action.m_exec = &Action::execImpl<FaultCodes, &FaultCodes::previousPage>;
+        addHandler(30u, action);
         size_ = 0;
         page_ = 0;
+        pages_ = 1;
         clearRows();
+        showPaging();
         header("Select Read fault codes (engine, read only)");
         return true;
     }
@@ -192,8 +244,22 @@ public:
 
     bool readCodes(const bmw::Parcel&) { startScan(); return true; }
     bool nextPage(const bmw::Parcel&) {
-        if (fd_ < 0 && size_) { ++page_; render(); }
+        if (fd_ < 0 && size_ && page_ + 1 < pages_) { ++page_; render(); }
         return true;
+    }
+    bool previousPage(const bmw::Parcel&) {
+        if (fd_ < 0 && size_ && page_ > 0) { --page_; render(); }
+        return true;
+    }
+    // Previous only after the first page, Next only before the last one,
+    // on both the list and the details page.
+    void showPaging() {
+        bmw::Parcel previous(fd_ < 0 && size_ && page_ > 0);
+        bmw::Parcel next(fd_ < 0 && size_ && page_ + 1 < pages_);
+        setProperty(314u, 3u, previous);
+        setProperty(420u, 3u, previous);
+        setProperty(311u, 3u, next);
+        setProperty(421u, 3u, next);
     }
 };
 
@@ -220,9 +286,11 @@ void FaultCodes::startScan() {
     fd_ = channel[0];
     size_ = 0;
     page_ = 0;
+    pages_ = 1;
     result_[0] = 0;
     ++generation_;
     clearRows();
+    showPaging();
     header("Reading engine fault and shadow memory...");
     postPoll();
 }
@@ -253,7 +321,8 @@ void FaultCodes::render() {
     // No division: the head unit's libc may not export the ARM EABI divide helpers.
     unsigned pages = 1;
     for (unsigned covered = kPageSize; covered < lines; covered += kPageSize) ++pages;
-    if (page_ >= pages) page_ = 0;
+    if (page_ >= pages) page_ = pages - 1;
+    pages_ = pages;
     char text[160];
     int length = first ? static_cast<int>(first - result_) : static_cast<int>(size_);
     if (length > 110) length = 110;
@@ -272,8 +341,12 @@ void FaultCodes::render() {
         format_line(line, n, left, sizeof left, right, sizeof right);
         updateModel(81u + i, bmw::BasicString<char>(left));
         updateModel(91u + i, bmw::BasicString<char>(right));
+        char detail[4][96];
+        detail_lines(line, n, detail);
+        for (unsigned k = 0; k < 4; ++k) updateModel(60u + 4u * i + k, bmw::BasicString<char>(detail[k]));
         line = end ? end + 1 : "";
     }
+    showPaging();
 }
 
 extern "C" {

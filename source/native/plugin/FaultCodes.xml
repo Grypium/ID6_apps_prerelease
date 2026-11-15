@@ -8,8 +8,10 @@
     </entryButton>
     <actions>
       <hmiAction id="10" target="101" />
+      <hmiAction id="31" target="102" />
       <raAction id="23" />
       <raAction id="29" />
+      <raAction id="30" />
     </actions>
     <models>
       <raDataModel id="80" modelType="Richtext" />
@@ -22,6 +24,22 @@
       <raDataModel id="92" modelType="Richtext" />
       <raDataModel id="93" modelType="Richtext" />
       <raDataModel id="94" modelType="Richtext" />
+      <raDataModel id="60" modelType="Richtext" />
+      <raDataModel id="61" modelType="Richtext" />
+      <raDataModel id="62" modelType="Richtext" />
+      <raDataModel id="63" modelType="Richtext" />
+      <raDataModel id="64" modelType="Richtext" />
+      <raDataModel id="65" modelType="Richtext" />
+      <raDataModel id="66" modelType="Richtext" />
+      <raDataModel id="67" modelType="Richtext" />
+      <raDataModel id="68" modelType="Richtext" />
+      <raDataModel id="69" modelType="Richtext" />
+      <raDataModel id="70" modelType="Richtext" />
+      <raDataModel id="71" modelType="Richtext" />
+      <raDataModel id="72" modelType="Richtext" />
+      <raDataModel id="73" modelType="Richtext" />
+      <raDataModel id="74" modelType="Richtext" />
+      <raDataModel id="75" modelType="Richtext" />
     </models>
     <hmiStates>
       <hmiState id="101" text="Fault Codes">
@@ -83,16 +101,34 @@
             <properties>
               <property id="20" value="49" />
               <property id="21" value="370" />
-              <property id="9" value="460" />
+              <property id="9" value="262" />
               <property id="10" value="52" />
+            </properties>
+          </button>
+          <button id="315" action="31" text="Details">
+            <properties>
+              <property id="20" value="321" />
+              <property id="21" value="370" />
+              <property id="9" value="262" />
+              <property id="10" value="52" />
+            </properties>
+          </button>
+          <button id="314" action="30" text="Previous page">
+            <properties>
+              <property id="20" value="593" />
+              <property id="21" value="370" />
+              <property id="9" value="262" />
+              <property id="10" value="52" />
+              <property id="3" value="false" />
             </properties>
           </button>
           <button id="311" action="29" text="Next page">
             <properties>
-              <property id="20" value="531" />
+              <property id="20" value="865" />
               <property id="21" value="370" />
-              <property id="9" value="460" />
+              <property id="9" value="262" />
               <property id="10" value="52" />
+              <property id="3" value="false" />
             </properties>
           </button>
           <label id="330" model="91">
@@ -127,6 +163,37 @@
               <property id="10" value="58" />
             </properties>
           </label>
+        </components>
+      </hmiState>
+      <hmiState id="102" parentId="101" text="Fault code details">
+        <components>
+          <label id="400" model="80" />
+          <label id="401" model="60" />
+          <label id="402" model="61" />
+          <label id="403" model="62" />
+          <label id="404" model="63" />
+          <label id="405" model="64" />
+          <label id="406" model="65" />
+          <label id="407" model="66" />
+          <label id="408" model="67" />
+          <label id="409" model="68" />
+          <label id="410" model="69" />
+          <label id="411" model="70" />
+          <label id="412" model="71" />
+          <label id="413" model="72" />
+          <label id="414" model="73" />
+          <label id="415" model="74" />
+          <label id="416" model="75" />
+          <button id="420" action="30" text="Previous page">
+            <properties>
+              <property id="3" value="false" />
+            </properties>
+          </button>
+          <button id="421" action="29" text="Next page">
+            <properties>
+              <property id="3" value="false" />
+            </properties>
+          </button>
         </components>
       </hmiState>
     </hmiStates>
