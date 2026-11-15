@@ -189,3 +189,6 @@ _Stderr: .space 80
 .type errno,%object
 .size errno,4
 errno: .space 4
+.globl memmove
+.type memmove,%function
+memmove: bx lr

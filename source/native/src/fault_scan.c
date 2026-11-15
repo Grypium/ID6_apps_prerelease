@@ -67,7 +67,7 @@ static int ask_module(int fd, unsigned ecu, unsigned char *body, unsigned size) 
             return -1;
         }
         if (body[2] != 0x59 || body[3] != 0x02) continue;
-        memmove(body, body + 2, len - 2);
+        { uint32_t k; for (k = 2; k < len; ++k) body[k-2] = body[k]; }
         return (int)(len - 2);
     }
     return -1;

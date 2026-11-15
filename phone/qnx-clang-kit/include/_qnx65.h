@@ -80,6 +80,7 @@ int strncmp(const char *, const char *, size_t);
 char *strcpy(char *, const char *);
 char *strrchr(const char *, int);
 char *strchr(const char *, int);
+void *memmove(void *, const void *, unsigned int);
 size_t strcspn(const char *, const char *);
 char *strerror(int);
 
