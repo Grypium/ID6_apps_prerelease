@@ -1,0 +1,5 @@
+stubs/*.so
+stubs/*.so.*
+!stubs/*.S
+!stubs/*.ver
+__pycache__/

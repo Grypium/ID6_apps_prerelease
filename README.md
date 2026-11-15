@@ -1,5 +1,7 @@
 # NBT Evo ID6 apps
 
+> **Phone-only (Android/Termux) setup and the FaultCodes app:** see [`phone/README.md`](phone/README.md) in this fork.
+
 Connect your parked car to a computer over wired ENET. Open an AI agent with terminal access on that computer and give it this repository and [AgentReadMe.md](AgentReadMe.md). The agent identifies your head unit, checks compatibility, and installs your chosen apps under **My Vehicle**.
 
 If your head unit needs temporary SSH access, use [Bavarian SSH Client](https://ssh.bavarian-aa.uk/) when your agent asks. Check that the client supports your exact head unit and firmware.

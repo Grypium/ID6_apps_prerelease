@@ -1,0 +1,20 @@
+<?xml version='1.0' encoding='utf-8'?>
+<plugin>
+  <name>FaultCodes</name>
+  <type>App</type>
+  <file>{pluginDir}/FaultCodes</file>
+  <config>
+    <autoStart>yes</autoStart>
+    <dependencies>
+      <pluginAppConnector>
+        <type>Etch</type>
+        <id>113</id>
+        <asyncCallbacks>yes</asyncCallbacks>
+      </pluginAppConnector>
+    </dependencies>
+    <parameters>
+      <DescFile>{pluginDir}/FaultCodes.xml</DescFile>
+      <ImageDBFile>{pluginDir}/FaultCodes_ALL_Images.zip</ImageDBFile>
+    </parameters>
+  </config>
+</plugin>

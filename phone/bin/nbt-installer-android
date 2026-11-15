@@ -1,0 +1,8 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Run the Ethernet-aware installer (built by phone/installer/build-installer.sh).
+# Looks up the Ethernet network handle via adb so car sockets are bound to eth0.
+# Usage: nbt-installer-android [--no-browser]
+BIN="${NBT_INSTALLER:-$HOME/nbt-installer-enet}"
+H=$(adb -s localhost:5555 shell dumpsys connectivity | grep -m1 'ni{Ethernet CONNECTED' | grep -oE 'handle\{[0-9]+\}' | grep -oE '[0-9]+')
+[ -z "$H" ] && { echo "Ethernet not connected (adapter plugged in? static IP set? see phone/README.md)"; exit 1; }
+NBT_NET_HANDLE=$H exec "$BIN" "$@"

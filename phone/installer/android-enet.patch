@@ -1,0 +1,100 @@
+diff --git a/source/enet.go b/source/enet.go
+index 99a5a17..2ae86ad 100644
+--- a/source/enet.go
++++ b/source/enet.go
+@@ -85,6 +85,9 @@ var addressTag = regexp.MustCompile(`DIAGADR(10|62|63)`)
+ 
+ func broadcast(local string) (gateways, heads []string) {
+ 	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
++		if err := bindENET(c); err != nil {
++			return err
++		}
+ 		var err error
+ 		if e := c.Control(func(fd uintptr) { err = enableBroadcast(fd) }); e != nil {
+ 			return e
+@@ -133,7 +136,7 @@ func enetDial(local, host, port string, limit time.Duration) (net.Conn, error) {
+ 	if _, err := usableIP(host); err != nil {
+ 		return nil, err
+ 	}
+-	d := net.Dialer{Timeout: limit}
++	d := net.Dialer{Timeout: limit, Control: func(_, _ string, c syscall.RawConn) error { return bindENET(c) }}
+ 	if local != "" {
+ 		if _, err := usableIP(local); err != nil {
+ 			return nil, err
+diff --git a/source/main.go b/source/main.go
+index da52649..695ff0d 100644
+--- a/source/main.go
++++ b/source/main.go
+@@ -138,6 +138,9 @@ func main() {
+ 			_ = exec.Command("/usr/bin/open", url).Start()
+ 		case "windows":
+ 			_ = exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", url).Start()
++		case "android":
++			// Termux: requires the termux-tools package (installed by default).
++			_ = exec.Command("termux-open-url", url).Start()
+ 		default:
+ 			_ = exec.Command("xdg-open", url).Start()
+ 		}
+diff --git a/source/netbind_android.go b/source/netbind_android.go
+new file mode 100644
+index 0000000..15faa8a
+--- /dev/null
++++ b/source/netbind_android.go
+@@ -0,0 +1,44 @@
++//go:build android
++
++package main
++
++/*
++#cgo LDFLAGS: -landroid
++#include <android/multinetwork.h>
++#include <errno.h>
++static int bind_net(unsigned long long h, int fd) {
++	if (android_setsocknetwork((net_handle_t)h, fd) != 0) return errno ? errno : -1;
++	return 0;
++}
++*/
++import "C"
++
++import (
++	"fmt"
++	"os"
++	"strconv"
++	"syscall"
++)
++
++// Android routes app traffic over Wi-Fi/mobile even when Ethernet is up, so
++// 169.254.x.x (car ENET) is unreachable unless each socket is bound to the
++// Ethernet network. NBT_NET_HANDLE is that network's handle (from
++// `dumpsys connectivity`, set by the nbt-installer-android wrapper).
++func bindENET(c syscall.RawConn) error {
++	h := os.Getenv("NBT_NET_HANDLE")
++	if h == "" {
++		return nil
++	}
++	v, err := strconv.ParseUint(h, 10, 64)
++	if err != nil {
++		return fmt.Errorf("bad NBT_NET_HANDLE: %w", err)
++	}
++	var rc C.int
++	if err := c.Control(func(fd uintptr) { rc = C.bind_net(C.ulonglong(v), C.int(fd)) }); err != nil {
++		return err
++	}
++	if rc != 0 {
++		return fmt.Errorf("binding socket to Ethernet network failed (errno %d)", int(rc))
++	}
++	return nil
++}
+diff --git a/source/netbind_other.go b/source/netbind_other.go
+new file mode 100644
+index 0000000..6338458
+--- /dev/null
++++ b/source/netbind_other.go
+@@ -0,0 +1,7 @@
++//go:build !android
++
++package main
++
++import "syscall"
++
++func bindENET(syscall.RawConn) error { return nil }

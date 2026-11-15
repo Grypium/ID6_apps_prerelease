@@ -1,0 +1,19 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# ui dump | ui tap "Text" -- drive the phone UI over adb
+A="adb -s localhost:5555"
+dump(){ $A shell 'uiautomator dump /sdcard/ui.xml >/dev/null 2>&1; cat /sdcard/ui.xml'; }
+case $1 in
+ dump) dump | python3 -c "
+import sys,re
+for n in re.findall(r'<node [^>]*>',sys.stdin.read()):
+  g=lambda k:(re.search(k+r'=\"([^\"]*)\"',n) or [None,''])[1]
+  if g('text') or g('content-desc'): print(repr(g('text')),repr(g('content-desc')),g('resource-id').split('/')[-1],g('bounds'))";;
+ tap) dump | python3 -c "
+import sys,re
+t=sys.argv[1]
+for n in re.findall(r'<node [^>]*>',sys.stdin.read()):
+  m=re.search(r'text=\"([^\"]*)\"',n); d=re.search(r'content-desc=\"([^\"]*)\"',n)
+  if (m and m.group(1)==t) or (d and d.group(1)==t):
+    b=list(map(int,re.findall(r'\d+',re.search(r'bounds=\"([^\"]*)\"',n).group(1)))); print((b[0]+b[2])//2,(b[1]+b[3])//2); break
+" "$2" | { read x y && $A shell input tap $x $y && echo "tapped $2"; } || echo "not found: $2";;
+esac
