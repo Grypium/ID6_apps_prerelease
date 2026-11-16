@@ -24,7 +24,7 @@ build/mhd-maps: src/collector.c $(CORE) $(HEADERS) | build
 build/diag-hub: src/collector.c src/diag_hub.c $(CORE) $(HEADERS) | build
 	$(CC) $(CFLAGS) -Isrc -DDIAG_HUB $(filter %collector.c,$^) $(CORE) -lm -o $@
 
-build/test-apps: tests/test_apps.c src/fuel_blend.h src/perf_timer.h | build
+build/test-apps: tests/test_apps.c src/fuel_blend.h src/perf_timer.h src/engine_temps.h | build
 	$(CC) $(CFLAGS) -Isrc tests/test_apps.c -lm -o $@
 
 build/test-core: tests/test_core.c $(CORE) $(HEADERS) | build

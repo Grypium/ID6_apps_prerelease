@@ -20,7 +20,7 @@ VALUES = {0x4201: bytes.fromhex("63ca"), 0x4205: bytes.fromhex("37e5"),
           0x5889: bytes.fromhex("104e"), 0x4A49: bytes.fromhex("004e"),
           0x580F: bytes.fromhex("82"), 0xDA12: bytes.fromhex("008e"),
           0x56D7: bytes.fromhex("1169"), 0x586F: bytes.fromhex("09c1"),
-          0x4300: bytes.fromhex("0bf8")}
+          0x4300: bytes.fromhex("0bf8"), 0x4408: bytes.fromhex("0ef4")}
 
 
 def exact(conn, n):
@@ -151,7 +151,7 @@ class HubTest(unittest.TestCase):
     def setUp(self):
         self.procs = []
         self.hub_port, self.lock_port = free_udp_port(), free_udp_port()
-        self.boost, self.drive, self.timer = Sink(), Sink(), Sink()
+        self.boost, self.drive, self.timer, self.temps = Sink(), Sink(), Sink(), Sink()
 
     def tearDown(self):
         for p in self.procs:
@@ -161,13 +161,14 @@ class HubTest(unittest.TestCase):
         self.boost.close()
         self.drive.close()
         self.timer.close()
+        self.temps.close()
 
     def start(self, gw, client, extra=()):
         """Starts one hub instance under its own sh parent (like a plugin)."""
         cmd = [BIN, "--host", "127.0.0.1", "--port", str(gw.port), "--client", client,
                "--hub-port", str(self.hub_port), "--lock-port", str(self.lock_port),
                "--boost-port", str(self.boost.port), "--drive-port", str(self.drive.port),
-               "--timer-port", str(self.timer.port), *extra]
+               "--timer-port", str(self.timer.port), "--temps-port", str(self.temps.port), *extra]
         parent = subprocess.Popen(["sh", "-c", '"$@" & wait', "sh", *cmd],
                                   stderr=subprocess.DEVNULL)
         self.procs.append(parent)
@@ -222,6 +223,43 @@ class HubTest(unittest.TestCase):
         self.assertEqual(frames[-1][3], 0x32)
         self.assertEqual(gw.max_open, 1)
         self.assertEqual(self.drive.packets, [], "nothing sent to ShiftDeck's port when it is not open")
+        gw.close()
+
+    def temps_frames(self):
+        return [(t,) + struct.unpack("=Qiiii", p) for t, p in self.temps.packets]
+
+    def test_temps_client_alone_reads_little(self):
+        gw = FakeGateway()
+        self.start(gw, "temps")
+        time.sleep(4.5)
+        frames = self.temps_frames()
+        self.assertGreaterEqual(len(frames), 3, "about one frame a second")
+        self.assertLessEqual(len(frames), 6)
+        _, _, oil, coolant, intake, trans = frames[-1]
+        self.assertAlmostEqual(oil, round((0x0EF4 / 10 - 273.15) * 10), delta=1)
+        self.assertAlmostEqual(coolant, round((0x0BF8 / 10 - 273.15) * 10), delta=1)
+        self.assertAlmostEqual(intake, round((0x82 * .75 - 48) * 10), delta=1)
+        self.assertEqual(trans, (0x8E - 48) * 10)
+        reqs = list(gw.requests)
+        self.assertFalse([u for _, _, u in reqs if u[:3] == bytes([0x22, 0x42, 0x05])], "no BoostDeck fast reads")
+        self.assertFalse([u for _, _, u in reqs if u[0] == 0x01], "no rpm/speed reads")
+        self.assertLessEqual(len(reqs) / 4.5, 3.5, "about two requests a second")
+        temps = [u for _, _, u in reqs if u[:3] == bytes([0x22, 0x44, 0x08])]
+        self.assertTrue(temps and all(len(u) == 7 for u in temps), "oil, coolant, intake in one request")
+        self.assertEqual(self.boost.packets, [], "nothing sent to BoostDeck's port")
+        gw.close()
+
+    def test_temps_and_boost_share_one_connection(self):
+        gw = FakeGateway()
+        self.start(gw, "boost")
+        time.sleep(0.3)
+        self.start(gw, "temps")
+        time.sleep(3.5)
+        self.assertEqual(gw.max_open, 1)
+        frames = self.temps_frames()
+        self.assertGreaterEqual(len(frames), 2)
+        self.assertNotEqual(frames[-1][3], -2**31, "oil valid")
+        self.assertGreater(len(self.boost_frames()), 10, "BoostDeck still served")
         gw.close()
 
     def test_read_only_and_rate_ceiling(self):

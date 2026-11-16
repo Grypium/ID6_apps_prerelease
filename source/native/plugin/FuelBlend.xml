@@ -43,7 +43,7 @@
       <raDataModel id="91" modelType="Richtext" />
       <raDataModel id="92" modelType="Richtext" />
       <raDataModel id="93" modelType="Richtext" />
-      <imageIdModel id="95" imageId="56900" />
+      <imageIdModel id="99" imageId="56900" />
     </models>
     <hmiStates>
       <hmiState id="100" text="Fuel Blend">
@@ -52,7 +52,7 @@
           <button id="313" action="41" text="Calibrate E85" />
         </optionComponents>
         <components>
-          <image id="328" model="95">
+          <image id="328" model="99">
             <properties>
               <property id="20" value="36" />
               <property id="21" value="9" />
@@ -170,7 +170,7 @@
       </hmiState>
       <hmiState id="101" parentId="100" text="Pump settings">
         <components>
-          <image id="400" model="95">
+          <image id="400" model="99">
             <properties>
               <property id="20" value="36" />
               <property id="21" value="9" />
@@ -248,7 +248,7 @@
       </hmiState>
       <hmiState id="102" parentId="100" text="Calibrate E85">
         <components>
-          <image id="500" model="95">
+          <image id="500" model="99">
             <properties>
               <property id="20" value="36" />
               <property id="21" value="9" />

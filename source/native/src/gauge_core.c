@@ -37,6 +37,7 @@ int bd_decode_did(unsigned did, const unsigned char *p, size_t n, double *out) {
     case 0x56d7: if (r == 65535) return 0; x = r / 50.0; lo = 0; hi = 500; break; /* rail bar */
     case 0x586f: if (r == 65535) return 0; x = r / 1000.0; lo = 0; hi = 20; break; /* oil bar */
     case 0x4300: if (r == 65535) return 0; x = r / 10.0 - 273.15; lo = -48; hi = 150; break;
+    case 0x4408: if (r == 65535) return 0; x = r / 10.0 - 273.15; lo = -48; hi = 170; break; /* oil C */
     default: return 0;
     }
     if (!isfinite(x) || x < lo || x > hi) return 0;

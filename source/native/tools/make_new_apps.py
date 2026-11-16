@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write the FuelBlend and PerfTimers layouts, manifests and background art.
+"""Write the FuelBlend, PerfTimers, ExhaustFlap and EngineTemps layouts, manifests and background art.
 
 Usage: make_new_apps.py PLUGIN_DIR
 Writes <App>.xml, <App>.manifest and <App>_ALL_Images.zip for both apps.
@@ -23,7 +23,7 @@ def props(x, y, w, h, extra=""):
 
 
 def image(cid):
-    return (f'          <image id="{cid}" model="95">\n' +
+    return (f'          <image id="{cid}" model="99">\n' +
             props(36, 9, 1120, 352, '              <property id="2" value="false" />\n'
                                     '              <property id="3" value="true" />\n') + '          </image>\n')
 
@@ -42,7 +42,7 @@ def app_xml(name, text, weight, image_id, actions, models, states):
            '    <entryButton id="1" action="10">\n      <properties>\n        <property id="23" value="2" />\n'
            '      </properties>\n    </entryButton>\n    <actions>\n', actions, '    </actions>\n    <models>\n']
     out += [f'      <raDataModel id="{m}" modelType="Richtext" />\n' for m in models]
-    out += [f'      <imageIdModel id="95" imageId="{image_id}" />\n', '    </models>\n    <hmiStates>\n', states,
+    out += [f'      <imageIdModel id="99" imageId="{image_id}" />\n', '    </models>\n    <hmiStates>\n', states,
             '    </hmiStates>\n  </pluginApp>\n</pluginApps>\n']
     return "".join(out)
 
@@ -152,3 +152,14 @@ state = ['      <hmiState id="100" text="Exhaust Flap">\n        <components>\n'
 (OUT / "ExhaustFlap.xml").write_text(app_xml("ExhaustFlap", "Exhaust Flap", 214, 57100, ef_actions, [80, 81], "".join(state)))
 (OUT / "ExhaustFlap.manifest").write_text(manifest("ExhaustFlap", 116))
 art(OUT / "ExhaustFlap_ALL_Images.zip", 57100)
+
+# --- EngineTemps -------------------------------------------------------------
+et_actions = '      <hmiAction id="10" target="100" />\n'
+state = ['      <hmiState id="100" text="Engine Temps">\n        <components>\n', image(328), label(320, 80, 58, 20, 1067)]
+for i, y in enumerate(ROWS):
+    state += [label(321 + i, 82 + i, 62, y, 255), label(330 + i, 92 + i, 326, y, 801, 58)]
+state += [label(335, 81, 58, 372, 1067), '        </components>\n      </hmiState>\n']
+(OUT / "EngineTemps.xml").write_text(app_xml("EngineTemps", "Engine Temps", 215, 57200, et_actions,
+                                              [80, 81, 82, 83, 84, 85, 92, 93, 94, 95], "".join(state)))
+(OUT / "EngineTemps.manifest").write_text(manifest("EngineTemps", 117))
+art(OUT / "EngineTemps_ALL_Images.zip", 57200, divider_x=281)

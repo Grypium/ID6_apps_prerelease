@@ -226,6 +226,18 @@ steps aside. Confirmed on an F22 M240i with MHD (F-series flash): the DME echoes
 `6F 02 00`. A DME without the MHD flash rejects it. MHD has no read-back of the flap,
 so the app shows the last accepted mode.
 
+## Engine Temps
+
+`engine_temps.cpp` shows oil (DME `4408`), coolant (`4300`), transmission (EGS `DA12`)
+and intake air (`580F`) in F and C, with a warm-up guide based on oil temperature
+(`engine_temps.h`: cold under 60 C, warming under 80 C, ready from 90 C, hot from 130 C).
+While visible it runs the shared hub as client `temps`: one DME request a second plus
+EGS every two seconds, frames to UDP 42866 (`temps_frame.h`). BoostDeck's NBG3 frames
+are unchanged. Oil `4408` was checked against the dash (110 C vs 108.8 C read).
+
+All installed hub copies must be the same version (an older owner ignores newer
+clients): update them together with `phone/hub/update-hub.sh`.
+
 ## Tips and gotchas
 
 - QNX's shell on the head unit has no `printf`, `head` or `which`; use `print -r --`.

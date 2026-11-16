@@ -1,6 +1,8 @@
 /* Host tests for the Fuel Blend math and the performance timers. */
 #include "fuel_blend.h"
 #include "perf_timer.h"
+#include "engine_temps.h"
+#include <string.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -125,6 +127,25 @@ int main(void) {
         pt_sample(&s, 1550, -1);
         CHECK(s.phase == PT_IDLE, "no data cancels");
     }
-    if (!failures) puts("Apps: fuel blend math and performance timers passed.");
+    /* Engine Temps guide: stage boundaries, hot, no data, units. */
+    {
+        static const struct { int valid; double oil; int stage; } cases[] = {
+            {0, 100, ET_NO_DATA}, {1, -20, ET_COLD}, {1, 59.9, ET_COLD}, {1, 60, ET_WARMING},
+            {1, 79.9, ET_WARMING}, {1, 80, ET_NEARLY}, {1, 89.9, ET_NEARLY}, {1, 90, ET_WARM},
+            {1, 110, ET_WARM}, {1, 129.9, ET_WARM}, {1, 130, ET_HOT}};
+        unsigned i;
+        for (i = 0; i < sizeof cases / sizeof cases[0]; ++i)
+            if (et_oil_stage(cases[i].valid, cases[i].oil) != cases[i].stage) {
+                printf("FAIL engine temps stage for %.1f C\n", cases[i].oil);
+                ++failures;
+            }
+        if (fabs(et_fahrenheit(110) - 230) > 1e-9 || fabs(et_fahrenheit(-40) + 40) > 1e-9) {
+            puts("FAIL fahrenheit"); ++failures;
+        }
+        if (!strstr(et_guide(ET_COLD), "3,500") || !strstr(et_guide(ET_NO_DATA), "Waiting")) {
+            puts("FAIL guide text"); ++failures;
+        }
+    }
+    if (!failures) puts("Apps: fuel blend math, performance timers and engine temps guide passed.");
     return failures != 0;
 }

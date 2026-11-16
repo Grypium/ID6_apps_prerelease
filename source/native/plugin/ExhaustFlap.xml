@@ -15,12 +15,12 @@
     <models>
       <raDataModel id="80" modelType="Richtext" />
       <raDataModel id="81" modelType="Richtext" />
-      <imageIdModel id="95" imageId="57100" />
+      <imageIdModel id="99" imageId="57100" />
     </models>
     <hmiStates>
       <hmiState id="100" text="Exhaust Flap">
         <components>
-          <image id="328" model="95">
+          <image id="328" model="99">
             <properties>
               <property id="20" value="36" />
               <property id="21" value="9" />

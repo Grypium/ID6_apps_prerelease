@@ -6,6 +6,7 @@
  *   BoostDeck: --host IP --session      -> client "boost" (NBG3 frames, UDP 42860)
  *   ShiftDeck: --host IP                -> client "shift" (drive frames, UDP 42863)
  *   PerfTimers: --host IP --client timer -> client "timer" (drive frames, UDP 42865)
+ *   EngineTemps: --host IP --client temps -> client "temps" (temps frames, UDP 42866)
  *
  * Rules, so the gauges never crowd out the car's own systems or other tools:
  *   - Only one process talks to the car. The first instance binds the hub
@@ -26,6 +27,7 @@
  *     when their gauge screen is hidden.
  */
 #include "drive_frame.h"
+#include "temps_frame.h"
 
 enum {
     hub_port = 42864,          /* loopback control port: heartbeats */
@@ -38,13 +40,15 @@ enum {
     shift_ms = 80,
     timer_ms = 50,             /* speed for the performance timers */
     timer_port = 42865,
+    temps_ms = 1000,           /* oil, coolant, intake air: one request a second */
+    trans_stale_ms = 5000,
     guard_period_ms = 2000,
     yield_ms = 3000,
     request_timeout_ms = 300,
     max_backoff_ms = 60000
 };
 
-enum { C_BOOST = 1, C_SHIFT = 2, C_TIMER = 4 };
+enum { C_BOOST = 1, C_SHIFT = 2, C_TIMER = 4, C_TEMPS = 8 };
 
 static unsigned guard_pause_ms = 30000;
 static unsigned lock_port = DIAGNOSTIC_PORT;
@@ -170,12 +174,17 @@ static const int fast_slot[] = {BD_BOOST, BD_AFR, BD_TIMING, BD_RAIL, BD_OIL};
 static const unsigned slow_dids[] = {0x4201, 0x580f, 0x4300};
 static const int slow_slot[] = {-1, BD_IAT, BD_COOLANT}; /* 4201 = ambient, used for boost */
 
+static const unsigned temps_dids[] = {0x4408, 0x4300, 0x580f};
+static const int temps_slot[] = {-1, BD_COOLANT, BD_IAT}; /* 4408 = oil, kept outside the BoostDeck frame */
+
 static int multi_ok = 1; /* several DIDs per request until the DME refuses */
 static bd_frame frame;
 static uint64_t observed[BD_COUNT];
 static double ambient;
 static uint64_t ambient_time;
 static int have_ambient;
+static double oil_c;
+static uint64_t oil_time;
 
 static unsigned did_size(unsigned did) { return did == 0x580f ? 1u : 2u; }
 
@@ -184,6 +193,7 @@ static void store(unsigned did, int slot, const unsigned char *p, unsigned n) {
     if (slot >= 0) frame.valid &= ~(1u << slot);
     if (!bd_decode_did(did, p, n, &v)) return;
     if (did == 0x4201) { ambient = v; ambient_time = bd_mono_ms(); have_ambient = 1; return; }
+    if (did == 0x4408) { oil_c = v; oil_time = bd_mono_ms(); return; }
     if (did == 0x4205) {
         if (!have_ambient || bd_mono_ms() - ambient_time > 1800) return;
         v = (v - ambient) * .145037738; /* kPa absolute - ambient -> gauge psi */
@@ -312,14 +322,34 @@ static void send_boost(int sock, struct sockaddr_in *dest) {
     if (len > 0) sendto(sock, packet, (size_t)len, 0, (struct sockaddr *)dest, sizeof *dest);
 }
 
+static int32_t tenths(double v, uint64_t seen, uint64_t now, uint64_t stale) {
+    if (!seen || now - seen > stale) return TEMPS_NONE;
+    return (int32_t)(v * 10 + (v < 0 ? -.5 : .5));
+}
+
+static void send_temps(int sock, struct sockaddr_in *dest, int paused) {
+    struct temps_frame t;
+    uint64_t now = bd_mono_ms();
+    t.sampled_ms = now;
+    t.oil = t.coolant = t.intake = t.trans = TEMPS_NONE;
+    if (!paused) {
+        t.oil = tenths(oil_c, oil_time, now, TEMPS_STALE_MS);
+        t.coolant = tenths(frame.value[BD_COOLANT], observed[BD_COOLANT], now, TEMPS_STALE_MS);
+        t.intake = tenths(frame.value[BD_IAT], observed[BD_IAT], now, TEMPS_STALE_MS);
+        t.trans = tenths(frame.value[BD_TRANS], observed[BD_TRANS], now, trans_stale_ms);
+    }
+    sendto(sock, &t, sizeof t, 0, (struct sockaddr *)dest, sizeof *dest);
+}
+
 int main(int argc, char **argv) {
-    unsigned boost_port = BD_UDP_PORT, drive_port = DRIVE_PORT, control_port = hub_port, timer_out = timer_port;
+    unsigned boost_port = BD_UDP_PORT, drive_port = DRIVE_PORT, control_port = hub_port, timer_out = timer_port,
+             temps_out = TEMPS_PORT;
     unsigned cycles = 0, done = 0, i;
     int me = C_SHIFT, control = -1, out, explicit_client = 0;
     pid_t parent = getppid();
-    struct sockaddr_in boost_dest, drive_dest, timer_dest, control_dest;
-    uint64_t seen[5] = {0, 0, 0, 0, 0}, next_beat = 0, due_fast = 0, due_slow = 0, due_trans = 0,
-             due_shift = 0, due_guard = 0, last_boost_frame = 0;
+    struct sockaddr_in boost_dest, drive_dest, timer_dest, temps_dest, control_dest;
+    uint64_t seen[C_TEMPS + 1] = {0}, next_beat = 0, due_fast = 0, due_slow = 0, due_trans = 0,
+             due_shift = 0, due_guard = 0, due_temps = 0, last_boost_frame = 0, last_temps_frame = 0;
 
     for (i = 1; i < (unsigned)argc; ++i) {
         if (!strcmp(argv[i], "--host") && i + 1 < (unsigned)argc && !gw_host) gw_host = argv[++i];
@@ -329,16 +359,19 @@ int main(int argc, char **argv) {
             if (!strcmp(argv[i], "boost")) me = C_BOOST;
             else if (!strcmp(argv[i], "shift")) me = C_SHIFT;
             else if (!strcmp(argv[i], "timer")) me = C_TIMER;
+            else if (!strcmp(argv[i], "temps")) me = C_TEMPS;
             else return 2;
         }
         else if (!strcmp(argv[i], "--port") && i + 1 < (unsigned)argc) gw_port = number(argv[++i], 1, 65535);
         else if (!strcmp(argv[i], "--udp-port") && i + 1 < (unsigned)argc) {
             unsigned p = number(argv[++i], 1, 65535);
-            if (me == C_BOOST) boost_port = p; else if (me == C_TIMER) timer_out = p; else drive_port = p;
+            if (me == C_BOOST) boost_port = p; else if (me == C_TIMER) timer_out = p;
+            else if (me == C_TEMPS) temps_out = p; else drive_port = p;
         }
         else if (!strcmp(argv[i], "--boost-port") && i + 1 < (unsigned)argc) boost_port = number(argv[++i], 1, 65535);
         else if (!strcmp(argv[i], "--drive-port") && i + 1 < (unsigned)argc) drive_port = number(argv[++i], 1, 65535);
         else if (!strcmp(argv[i], "--timer-port") && i + 1 < (unsigned)argc) timer_out = number(argv[++i], 1, 65535);
+        else if (!strcmp(argv[i], "--temps-port") && i + 1 < (unsigned)argc) temps_out = number(argv[++i], 1, 65535);
         else if (!strcmp(argv[i], "--hub-port") && i + 1 < (unsigned)argc) control_port = number(argv[++i], 1, 65535);
         else if (!strcmp(argv[i], "--lock-port") && i + 1 < (unsigned)argc) lock_port = number(argv[++i], 1, 65535);
         else if (!strcmp(argv[i], "--guard-pause-ms") && i + 1 < (unsigned)argc) guard_pause_ms = number(argv[++i], 100, 600000);
@@ -346,7 +379,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--trace")) trace_hub = 1;
         else if (!strcmp(argv[i], "--no-trans")) {}
         else {
-            fprintf(stderr, "Usage: %s --host IPv4 [--session | --client boost|shift|timer] [--port 6801] [--trace]\n", argv[0]);
+            fprintf(stderr, "Usage: %s --host IPv4 [--session | --client boost|shift|timer|temps] [--port 6801] [--trace]\n", argv[0]);
             return 2;
         }
     }
@@ -357,6 +390,7 @@ int main(int argc, char **argv) {
     to_loopback(&boost_dest, boost_port);
     to_loopback(&drive_dest, drive_port);
     to_loopback(&timer_dest, timer_out);
+    to_loopback(&temps_dest, temps_out);
     to_loopback(&control_dest, control_port);
     memset(&frame, 0, sizeof frame);
     memset(&drive, 0, sizeof drive);
@@ -379,12 +413,13 @@ int main(int argc, char **argv) {
             char b[16];
             ssize_t k;
             while ((k = recv(control, b, sizeof b, 0)) > 0)
-                if (b[0] == C_BOOST || b[0] == C_SHIFT || b[0] == C_TIMER) seen[(int)b[0]] = now;
+                if (b[0] == C_BOOST || b[0] == C_SHIFT || b[0] == C_TIMER || b[0] == C_TEMPS) seen[(int)b[0]] = now;
         }
         wanted = me;
         if (seen[C_BOOST] && now - seen[C_BOOST] < subscriber_ttl_ms) wanted |= C_BOOST;
         if (seen[C_SHIFT] && now - seen[C_SHIFT] < subscriber_ttl_ms) wanted |= C_SHIFT;
         if (seen[C_TIMER] && now - seen[C_TIMER] < subscriber_ttl_ms) wanted |= C_TIMER;
+        if (seen[C_TEMPS] && now - seen[C_TEMPS] < subscriber_ttl_ms) wanted |= C_TEMPS;
 
         if (now >= paused_until && gw < 0 && lock < 0 && trace_hub && paused_until)
             fprintf(stderr, "hub: resuming\n");
@@ -404,7 +439,10 @@ int main(int argc, char **argv) {
             } else if ((wanted & C_BOOST) && now >= due_slow) {
                 due_slow = now + boost_slow_ms;
                 sent = read_group(slow_dids, slow_slot, 3);
-            } else if ((wanted & C_BOOST) && now >= due_trans) {
+            } else if ((wanted & C_TEMPS) && now >= due_temps) {
+                due_temps = now + temps_ms;
+                sent = read_group(temps_dids, temps_slot, 3);
+            } else if ((wanted & (C_BOOST | C_TEMPS)) && now >= due_trans) {
                 due_trans = now + trans_ms;
                 sent = read_trans();
             } else if ((wanted & C_BOOST) && now >= due_fast) {
@@ -418,6 +456,10 @@ int main(int argc, char **argv) {
             if (now < paused_until) frame.valid = 0; /* paused: show gauges as unavailable */
             send_boost(out, &boost_dest);
             last_boost_frame = now;
+        }
+        if ((wanted & C_TEMPS) && now - last_temps_frame >= temps_ms) {
+            send_temps(out, &temps_dest, now < paused_until);
+            last_temps_frame = now;
         }
         nap(gw >= 0 ? 5 : 20);
     }

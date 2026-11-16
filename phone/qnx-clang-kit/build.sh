@@ -50,6 +50,10 @@ if [ -f "$SRC/src/perf_timers.cpp" ]; then
   LIBS=(-l:libm.so.2 -l:libsocket.so.3 -l:libstdc++.so.6 -l:libc.so.3)
   plugin PerfTimers "$SRC/src/perf_timers.cpp" "" "$O/core.o"
 fi
+if [ -f "$SRC/src/engine_temps.cpp" ]; then
+  LIBS=(-l:libm.so.2 -l:libsocket.so.3 -l:libstdc++.so.6 -l:libc.so.3)
+  plugin EngineTemps "$SRC/src/engine_temps.cpp" "" "$O/core.o"
+fi
 
 # Worker executables
 worker() { # outname "collector defines" "core defines"
