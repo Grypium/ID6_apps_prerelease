@@ -1,0 +1,77 @@
+<?xml version='1.0' encoding='utf-8'?>
+<pluginApps>
+  <pluginApp applicationType="VehicleInformation" applicationWeight="214" text="Exhaust Flap">
+    <entryButton id="1" action="10">
+      <properties>
+        <property id="23" value="2" />
+      </properties>
+    </entryButton>
+    <actions>
+      <hmiAction id="10" target="100" />
+      <raAction id="21" />
+      <raAction id="22" />
+      <raAction id="23" />
+    </actions>
+    <models>
+      <raDataModel id="80" modelType="Richtext" />
+      <raDataModel id="81" modelType="Richtext" />
+      <imageIdModel id="95" imageId="57100" />
+    </models>
+    <hmiStates>
+      <hmiState id="100" text="Exhaust Flap">
+        <components>
+          <image id="328" model="95">
+            <properties>
+              <property id="20" value="36" />
+              <property id="21" value="9" />
+              <property id="9" value="1120" />
+              <property id="10" value="352" />
+              <property id="2" value="false" />
+              <property id="3" value="true" />
+            </properties>
+          </image>
+          <label id="320" model="80">
+            <properties>
+              <property id="20" value="58" />
+              <property id="21" value="20" />
+              <property id="9" value="1067" />
+              <property id="10" value="55" />
+            </properties>
+          </label>
+          <label id="321" model="81">
+            <properties>
+              <property id="20" value="62" />
+              <property id="21" value="83" />
+              <property id="9" value="1040" />
+              <property id="10" value="55" />
+            </properties>
+          </label>
+          <button id="341" action="21" text="Auto (car controls it)">
+            <properties>
+              <property id="20" value="62" />
+              <property id="21" value="150" />
+              <property id="9" value="1040" />
+              <property id="10" value="55" />
+            </properties>
+          </button>
+          <button id="342" action="22" text="Open">
+            <properties>
+              <property id="20" value="62" />
+              <property id="21" value="217" />
+              <property id="9" value="1040" />
+              <property id="10" value="55" />
+            </properties>
+          </button>
+          <button id="343" action="23" text="Closed">
+            <properties>
+              <property id="20" value="62" />
+              <property id="21" value="284" />
+              <property id="9" value="1040" />
+              <property id="10" value="55" />
+            </properties>
+          </button>
+        </components>
+      </hmiState>
+    </hmiStates>
+  </pluginApp>
+</pluginApps>

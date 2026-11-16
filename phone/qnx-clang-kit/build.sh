@@ -45,6 +45,7 @@ if [ -f "$SRC/src/fault_codes.cpp" ]; then
   plugin FaultCodes "$SRC/src/fault_codes.cpp" ""
 fi
 [ -f "$SRC/src/fuel_blend.cpp" ] && plugin FuelBlend "$SRC/src/fuel_blend.cpp" ""
+[ -f "$SRC/src/exhaust_flap.cpp" ] && plugin ExhaustFlap "$SRC/src/exhaust_flap.cpp" ""
 if [ -f "$SRC/src/perf_timers.cpp" ]; then
   LIBS=(-l:libm.so.2 -l:libsocket.so.3 -l:libstdc++.so.6 -l:libc.so.3)
   plugin PerfTimers "$SRC/src/perf_timers.cpp" "" "$O/core.o"
@@ -66,6 +67,8 @@ worker shift-deck-qnx "-DNATIVE_FAST -DSHIFT_DECK_ONLY" "-DPERF_LAB"
 # shift-deck-qnx for the official plugins, so gauge_core is built without
 # PERF_LAB (NBG3 frames, which the official BoostDeck plugin parses).
 [ -f "$SRC/src/diag_hub.c" ] && worker diag-hub-qnx "-DDIAG_HUB" ""
+# MHD flap control (2F 02 nn) for ExhaustFlap: the MHD worker with its PERF_LAB live controls.
+[ -f "$SRC/src/exhaust_flap.cpp" ] && worker exhaust-flap-qnx "-DMHD_MAPS_ONLY -DPERF_LAB" ""
 
 # File-operations helper (official build is static; this one links libc dynamically)
 CC -fno-pic -c "$SRC/fileops.c" -o "$O/fileops.o"

@@ -217,6 +217,15 @@ python3 source/native/tools/make_new_apps.py source/native/plugin   # layouts, m
 make -C source/native build/test-apps && source/native/build/test-apps
 ```
 
+## Exhaust Flap
+
+`exhaust_flap.cpp` sends MHD's own flap control, `2F 02 nn` (00 = the car controls
+it, 01 = open, 02 = closed), one request per press through `exhaust-flap-qnx` (the MHD
+worker built with `-DMHD_MAPS_ONLY -DPERF_LAB`). It takes the shared lock, so the hub
+steps aside. Confirmed on an F22 M240i with MHD (F-series flash): the DME echoes
+`6F 02 00`. A DME without the MHD flash rejects it. MHD has no read-back of the flap,
+so the app shows the last accepted mode.
+
 ## Tips and gotchas
 
 - QNX's shell on the head unit has no `printf`, `head` or `which`; use `print -r --`.

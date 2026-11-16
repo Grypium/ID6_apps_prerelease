@@ -225,7 +225,12 @@ int main(int argc, char **argv) {
     }
     if (!host || !function) return 2;
     signal(SIGINT,stop); signal(SIGTERM,stop); signal(SIGPIPE,SIG_IGN);
-    lock=reserve_gateway();
+    {   /* The shared hub hands the lock over within ~50 ms of being asked
+           (each failed attempt asks); retry briefly instead of failing at once. */
+        uint64_t give_up=bd_mono_ms()+1500;
+        while ((lock=reserve_gateway())<0 && errno==EADDRINUSE && running && bd_mono_ms()<give_up)
+            poll(0,0,20);
+    }
     if (lock<0) { puts("Diagnostics busy. Wait a moment and try again."); return 0; }
     fd=connect_gw(host,port);
     if (fd<0) {

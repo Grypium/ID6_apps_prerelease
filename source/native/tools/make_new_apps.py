@@ -140,3 +140,15 @@ state += [label(335, 81, 58, 372, 1067), '        </components>\n      </hmiStat
                                              [80, 81, 82, 83, 84, 85, 92, 93, 94, 95], "".join(state)))
 (OUT / "PerfTimers.manifest").write_text(manifest("PerfTimers", 115))
 art(OUT / "PerfTimers_ALL_Images.zip", 57000, divider_x=281)
+
+# --- ExhaustFlap -------------------------------------------------------------
+ef_actions = '      <hmiAction id="10" target="100" />\n' + "".join(f'      <raAction id="{a}" />\n' for a in (21, 22, 23))
+state = ['      <hmiState id="100" text="Exhaust Flap">\n        <components>\n', image(328),
+         label(320, 80, 58, 20, 1067), label(321, 81, 62, 83, 1040),
+         button(341, 21, "Auto (car controls it)", 62, 150, 1040),
+         button(342, 22, "Open", 62, 217, 1040),
+         button(343, 23, "Closed", 62, 284, 1040),
+         '        </components>\n      </hmiState>\n']
+(OUT / "ExhaustFlap.xml").write_text(app_xml("ExhaustFlap", "Exhaust Flap", 214, 57100, ef_actions, [80, 81], "".join(state)))
+(OUT / "ExhaustFlap.manifest").write_text(manifest("ExhaustFlap", 116))
+art(OUT / "ExhaustFlap_ALL_Images.zip", 57100)
