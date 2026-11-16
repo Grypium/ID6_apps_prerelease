@@ -24,11 +24,15 @@ build/mhd-maps: src/collector.c $(CORE) $(HEADERS) | build
 build/diag-hub: src/collector.c src/diag_hub.c $(CORE) $(HEADERS) | build
 	$(CC) $(CFLAGS) -Isrc -DDIAG_HUB $(filter %collector.c,$^) $(CORE) -lm -o $@
 
+build/test-apps: tests/test_apps.c src/fuel_blend.h src/perf_timer.h | build
+	$(CC) $(CFLAGS) -Isrc tests/test_apps.c -lm -o $@
+
 build/test-core: tests/test_core.c $(CORE) $(HEADERS) | build
 	$(CC) $(CFLAGS) -Isrc $(filter %.c,$^) -lm -o $@
 
-test: build/boostdeck-collector build/shift-deck build/mhd-maps build/test-core build/diag-hub
+test: build/boostdeck-collector build/shift-deck build/mhd-maps build/test-core build/diag-hub build/test-apps
 	./build/test-core
+	./build/test-apps
 	$(PYTHON) -B tests/test_transport.py
 	$(PYTHON) -B tests/test_drive_apps.py
 	$(PYTHON) -B tests/test_diag_hub.py

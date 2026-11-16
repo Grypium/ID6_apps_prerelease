@@ -5,6 +5,7 @@
  * shift-deck-qnx, so the official plugins launch it unchanged:
  *   BoostDeck: --host IP --session      -> client "boost" (NBG3 frames, UDP 42860)
  *   ShiftDeck: --host IP                -> client "shift" (drive frames, UDP 42863)
+ *   PerfTimers: --host IP --client timer -> client "timer" (drive frames, UDP 42865)
  *
  * Rules, so the gauges never crowd out the car's own systems or other tools:
  *   - Only one process talks to the car. The first instance binds the hub
@@ -35,13 +36,15 @@ enum {
     boost_slow_ms = 1000,
     trans_ms = 2000,
     shift_ms = 80,
+    timer_ms = 50,             /* speed for the performance timers */
+    timer_port = 42865,
     guard_period_ms = 2000,
     yield_ms = 3000,
     request_timeout_ms = 300,
     max_backoff_ms = 60000
 };
 
-enum { C_BOOST = 1, C_SHIFT = 2 };
+enum { C_BOOST = 1, C_SHIFT = 2, C_TIMER = 4 };
 
 static unsigned guard_pause_ms = 30000;
 static unsigned lock_port = DIAGNOSTIC_PORT;
@@ -310,12 +313,12 @@ static void send_boost(int sock, struct sockaddr_in *dest) {
 }
 
 int main(int argc, char **argv) {
-    unsigned boost_port = BD_UDP_PORT, drive_port = DRIVE_PORT, control_port = hub_port;
+    unsigned boost_port = BD_UDP_PORT, drive_port = DRIVE_PORT, control_port = hub_port, timer_out = timer_port;
     unsigned cycles = 0, done = 0, i;
     int me = C_SHIFT, control = -1, out, explicit_client = 0;
     pid_t parent = getppid();
-    struct sockaddr_in boost_dest, drive_dest, control_dest;
-    uint64_t seen[3] = {0, 0, 0}, next_beat = 0, due_fast = 0, due_slow = 0, due_trans = 0,
+    struct sockaddr_in boost_dest, drive_dest, timer_dest, control_dest;
+    uint64_t seen[5] = {0, 0, 0, 0, 0}, next_beat = 0, due_fast = 0, due_slow = 0, due_trans = 0,
              due_shift = 0, due_guard = 0, last_boost_frame = 0;
 
     for (i = 1; i < (unsigned)argc; ++i) {
@@ -325,15 +328,17 @@ int main(int argc, char **argv) {
             ++i; explicit_client = 1;
             if (!strcmp(argv[i], "boost")) me = C_BOOST;
             else if (!strcmp(argv[i], "shift")) me = C_SHIFT;
+            else if (!strcmp(argv[i], "timer")) me = C_TIMER;
             else return 2;
         }
         else if (!strcmp(argv[i], "--port") && i + 1 < (unsigned)argc) gw_port = number(argv[++i], 1, 65535);
         else if (!strcmp(argv[i], "--udp-port") && i + 1 < (unsigned)argc) {
             unsigned p = number(argv[++i], 1, 65535);
-            if (me == C_BOOST) boost_port = p; else drive_port = p;
+            if (me == C_BOOST) boost_port = p; else if (me == C_TIMER) timer_out = p; else drive_port = p;
         }
         else if (!strcmp(argv[i], "--boost-port") && i + 1 < (unsigned)argc) boost_port = number(argv[++i], 1, 65535);
         else if (!strcmp(argv[i], "--drive-port") && i + 1 < (unsigned)argc) drive_port = number(argv[++i], 1, 65535);
+        else if (!strcmp(argv[i], "--timer-port") && i + 1 < (unsigned)argc) timer_out = number(argv[++i], 1, 65535);
         else if (!strcmp(argv[i], "--hub-port") && i + 1 < (unsigned)argc) control_port = number(argv[++i], 1, 65535);
         else if (!strcmp(argv[i], "--lock-port") && i + 1 < (unsigned)argc) lock_port = number(argv[++i], 1, 65535);
         else if (!strcmp(argv[i], "--guard-pause-ms") && i + 1 < (unsigned)argc) guard_pause_ms = number(argv[++i], 100, 600000);
@@ -341,7 +346,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--trace")) trace_hub = 1;
         else if (!strcmp(argv[i], "--no-trans")) {}
         else {
-            fprintf(stderr, "Usage: %s --host IPv4 [--session | --client boost|shift] [--port 6801] [--trace]\n", argv[0]);
+            fprintf(stderr, "Usage: %s --host IPv4 [--session | --client boost|shift|timer] [--port 6801] [--trace]\n", argv[0]);
             return 2;
         }
     }
@@ -351,6 +356,7 @@ int main(int argc, char **argv) {
     if (out < 0) return 1;
     to_loopback(&boost_dest, boost_port);
     to_loopback(&drive_dest, drive_port);
+    to_loopback(&timer_dest, timer_out);
     to_loopback(&control_dest, control_port);
     memset(&frame, 0, sizeof frame);
     memset(&drive, 0, sizeof drive);
@@ -373,11 +379,12 @@ int main(int argc, char **argv) {
             char b[16];
             ssize_t k;
             while ((k = recv(control, b, sizeof b, 0)) > 0)
-                if (b[0] == C_BOOST || b[0] == C_SHIFT) seen[(int)b[0]] = now;
+                if (b[0] == C_BOOST || b[0] == C_SHIFT || b[0] == C_TIMER) seen[(int)b[0]] = now;
         }
         wanted = me;
         if (seen[C_BOOST] && now - seen[C_BOOST] < subscriber_ttl_ms) wanted |= C_BOOST;
         if (seen[C_SHIFT] && now - seen[C_SHIFT] < subscriber_ttl_ms) wanted |= C_SHIFT;
+        if (seen[C_TIMER] && now - seen[C_TIMER] < subscriber_ttl_ms) wanted |= C_TIMER;
 
         if (now >= paused_until && gw < 0 && lock < 0 && trace_hub && paused_until)
             fprintf(stderr, "hub: resuming\n");
@@ -386,10 +393,14 @@ int main(int argc, char **argv) {
             if (guard_supported && now >= due_guard) {
                 due_guard = now + guard_period_ms;
                 sent = check_session();
-            } else if ((wanted & C_SHIFT) && now >= due_shift) {
-                due_shift = now + shift_ms;
-                if ((sent = read_shift()) && now >= paused_until)
-                    sendto(out, &drive, sizeof drive, 0, (struct sockaddr *)&drive_dest, sizeof drive_dest);
+            } else if ((wanted & (C_SHIFT | C_TIMER)) && now >= due_shift) {
+                due_shift = now + ((wanted & C_TIMER) ? timer_ms : shift_ms);
+                if ((sent = read_shift()) && now >= paused_until) {
+                    if (wanted & C_SHIFT)
+                        sendto(out, &drive, sizeof drive, 0, (struct sockaddr *)&drive_dest, sizeof drive_dest);
+                    if (wanted & C_TIMER)
+                        sendto(out, &drive, sizeof drive, 0, (struct sockaddr *)&timer_dest, sizeof timer_dest);
+                }
             } else if ((wanted & C_BOOST) && now >= due_slow) {
                 due_slow = now + boost_slow_ms;
                 sent = read_group(slow_dids, slow_slot, 3);

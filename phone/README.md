@@ -195,6 +195,25 @@ NBT_PW='<root password>' phone/hub/swap.sh       # originals go to ID5/Removed-<
 NBT_PW='<root password>' phone/hub/restore.sh <ts>
 ```
 
+## Fuel Blend and Perf Timers
+
+- **Fuel Blend** (`fuel_blend.cpp`, math in `fuel_blend.h`): no car access. Set the
+  fuel in the tank (eighths), the blend in the tank and the target; it says how many
+  gallons of E85 to pump first and then to fill with 91, and the blend you end up
+  with (or the closest one if the target can't be reached on this fill). Pump
+  settings: the E85's real ethanol content and the 91's. "I filled up" saves the
+  result as the new blend. Tank size is fixed at 13.7 gal (F22 M240i).
+- **Perf Timers** (`perf_timers.cpp`, logic in `perf_timer.h`): 0-60 mph, 0-100 mph,
+  1/4 mile (time and trap speed, estimated from speed) from a stop, and 60-130 mph
+  rolling. It runs the shared hub as client `timer` (speed every 50 ms) only while
+  its screen is visible. Times start at first movement (no rollout), so they read
+  a little slower than magazine times. Closed course only.
+
+```sh
+python3 source/native/tools/make_new_apps.py source/native/plugin   # layouts, manifests, art
+make -C source/native build/test-apps && source/native/build/test-apps
+```
+
 ## Tips and gotchas
 
 - QNX's shell on the head unit has no `printf`, `head` or `which`; use `print -r --`.

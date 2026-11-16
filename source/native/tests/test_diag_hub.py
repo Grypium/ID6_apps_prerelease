@@ -151,7 +151,7 @@ class HubTest(unittest.TestCase):
     def setUp(self):
         self.procs = []
         self.hub_port, self.lock_port = free_udp_port(), free_udp_port()
-        self.boost, self.drive = Sink(), Sink()
+        self.boost, self.drive, self.timer = Sink(), Sink(), Sink()
 
     def tearDown(self):
         for p in self.procs:
@@ -160,12 +160,14 @@ class HubTest(unittest.TestCase):
             p.wait()
         self.boost.close()
         self.drive.close()
+        self.timer.close()
 
     def start(self, gw, client, extra=()):
         """Starts one hub instance under its own sh parent (like a plugin)."""
         cmd = [BIN, "--host", "127.0.0.1", "--port", str(gw.port), "--client", client,
                "--hub-port", str(self.hub_port), "--lock-port", str(self.lock_port),
-               "--boost-port", str(self.boost.port), "--drive-port", str(self.drive.port), *extra]
+               "--boost-port", str(self.boost.port), "--drive-port", str(self.drive.port),
+               "--timer-port", str(self.timer.port), *extra]
         parent = subprocess.Popen(["sh", "-c", '"$@" & wait', "sh", *cmd],
                                   stderr=subprocess.DEVNULL)
         self.procs.append(parent)
@@ -205,6 +207,21 @@ class HubTest(unittest.TestCase):
         # Fast boost values come from one request, not five.
         fast = [u for _, t, u in gw.requests if u[:3] == bytes([0x22, 0x42, 0x05])]
         self.assertTrue(fast and all(len(u) == 11 for u in fast))
+        gw.close()
+
+    def test_timer_client_gets_speed_every_50_ms(self):
+        gw = FakeGateway()
+        self.start(gw, "boost")
+        time.sleep(0.3)
+        self.start(gw, "timer")
+        time.sleep(3)
+        frames = [(t,) + struct.unpack("=Qii", p) for t, p in self.timer.packets if t > self.timer.packets[0][0] + 1]
+        self.assertGreater(len(frames), 25, "about 20 speed samples a second")
+        gaps = [b[1] - a[1] for a, b in zip(frames, frames[1:])]
+        self.assertLess(sorted(gaps)[len(gaps) // 2], 90, "median sample spacing")
+        self.assertEqual(frames[-1][3], 0x32)
+        self.assertEqual(gw.max_open, 1)
+        self.assertEqual(self.drive.packets, [], "nothing sent to ShiftDeck's port when it is not open")
         gw.close()
 
     def test_read_only_and_rate_ceiling(self):
