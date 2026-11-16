@@ -52,4 +52,29 @@ static inline int fb_calibrate(double in_tank, double before, double e85_added, 
     return FB_EXACT;
 }
 
+/* Ethanol sensor settling: a reading is "settled" once it has stayed within
+ * FB_SETTLE_BAND for FB_SETTLE_MS. After a fill the sensor first reads the old
+ * fuel still in the lines, then moves to the new blend. */
+enum { FB_SETTLE_MS = 30000 };
+#define FB_SETTLE_BAND 1.5
+#define FB_SETTLE_USED 0.5 /* gallons burned since the fill before trusting the sensor */
+
+typedef struct { double low, high; unsigned long long since; int started; } fb_settle;
+
+static inline int fb_settle_update(fb_settle *s, double value, unsigned long long now_ms) {
+    if (!s->started || value < s->low - 1e-9 || value > s->high + 1e-9) {
+        double low = s->started && value > s->low ? s->low : value;
+        double high = s->started && value < s->high ? s->high : value;
+        if (!s->started || high - low > FB_SETTLE_BAND) {
+            s->low = s->high = value;
+            s->since = now_ms;
+            s->started = 1;
+        } else {
+            s->low = low;
+            s->high = high;
+        }
+    }
+    return now_ms - s->since >= FB_SETTLE_MS;
+}
+
 #endif

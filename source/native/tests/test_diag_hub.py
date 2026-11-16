@@ -41,9 +41,11 @@ def exact(conn, n):
 class FakeGateway:
     """DME (0x12) and EGS (0x18) behind an HSFZ gateway."""
 
-    def __init__(self, multi=True, session=1, egs_multi=True, dme_delay=0.0, ramp=None):
+    def __init__(self, multi=True, session=1, egs_multi=True, dme_delay=0.0, ramp=None, obd_ethanol=None,
+                 mhd_ethanol=None):
         self.multi, self.session, self.egs_multi = multi, session, egs_multi
         self.ramp = ramp  # rpm per second: engine and turbine climb together (locked converter)
+        self.obd_ethanol, self.mhd_ethanol = obd_ethanol, mhd_ethanol  # raw A for 01 52 / byte 17 of 6C 88
         self.t0 = time.monotonic()
         self.dme_delay = dme_delay  # seconds before the DME answers (the car: ~30-50 ms)
         self.requests = []          # (time, target, uds bytes)
@@ -99,9 +101,21 @@ class FakeGateway:
                     value = int(self.ramp_rpm()).to_bytes(2, "big")
                 out += did.to_bytes(2, "big") + value
             return out
+        if target == 0x12 and sid == 0x2C and uds[1:3] == bytes([0x88, 0x01]):
+            if self.mhd_ethanol is None:
+                return bytes([0x7F, 0x2C, 0x31])
+            block = bytearray(38)
+            block[0:2] = b"\x6c\x88"
+            block[17] = self.mhd_ethanol
+            return bytes(block)
         if target == 0x12 and sid == 0x01:
             out = b"\x41"
             for pid in uds[1:]:
+                if pid == 0x52:
+                    if self.obd_ethanol is None:
+                        return bytes([0x7F, 0x01, 0x12])
+                    out += bytes([pid, self.obd_ethanol])
+                    continue
                 value = OBD[pid]
                 if pid == 0x0C and self.ramp:
                     value = int(self.ramp_rpm(0.09) * 4).to_bytes(2, "big")
@@ -318,12 +332,52 @@ class HubTest(unittest.TestCase):
         gw = FakeGateway()
         self.start(gw, "fuel")
         time.sleep(4.5)
-        frames = [struct.unpack("=Qi4x", p) for _, p in self.fuel.packets]
+        frames = [struct.unpack("=Qiiii", p) for _, p in self.fuel.packets]
         self.assertGreaterEqual(len(frames), 3)
         self.assertAlmostEqual(frames[-1][1], round(0x7B * 100 / 255 * 10), delta=1)
         reqs = [u for _, _, u in gw.requests]
         self.assertTrue(all(u in (bytes([0x01, 0x2F]), bytes([0x22, 0xF1, 0x86])) for u in reqs), reqs)
         self.assertLessEqual(len(reqs), 6, "a request every two seconds plus the session check")
+        gw.close()
+
+    def fuel_frames(self):
+        return [struct.unpack("=Qiiii", p) for _, p in self.fuel.packets]
+
+    def test_fuel_ethanol_off_unless_asked(self):
+        gw = FakeGateway(obd_ethanol=0x80, mhd_ethanol=55)
+        self.start(gw, "fuel")
+        time.sleep(3)
+        _, level, ethanol, source, _ = self.fuel_frames()[-1]
+        self.assertEqual((ethanol, source), (-2**31, 0))
+        self.assertFalse([u for _, _, u in gw.requests if u[:2] in (b"\x01\x52", b"\x2c\x88")], "no ethanol reads")
+        gw.close()
+
+    def test_fuel_ethanol_obd(self):
+        gw = FakeGateway(obd_ethanol=0x80, mhd_ethanol=55)
+        self.start(gw, "fuel", ("--ethanol", "obd"))
+        time.sleep(3)
+        _, level, ethanol, source, _ = self.fuel_frames()[-1]
+        self.assertAlmostEqual(ethanol, round(0x80 * 100 / 255 * 10), delta=1)
+        self.assertEqual(source, 1)
+        self.assertFalse([u for _, _, u in gw.requests if u[:2] == b"\x2c\x88"], "obd mode never sends the MHD request")
+        ethanol_reads = [u for _, _, u in gw.requests if u[:2] == b"\x01\x52"]
+        self.assertLessEqual(len(ethanol_reads), 2, "one ethanol read every five seconds")
+        gw.close()
+
+    def test_fuel_ethanol_obd_mode_never_falls_back_to_mhd(self):
+        gw = FakeGateway(obd_ethanol=None, mhd_ethanol=55)
+        self.start(gw, "fuel", ("--ethanol", "obd"))
+        time.sleep(3)
+        self.assertEqual(self.fuel_frames()[-1][2], -2**31)
+        self.assertFalse([u for _, _, u in gw.requests if u[:2] == b"\x2c\x88"])
+        gw.close()
+
+    def test_fuel_ethanol_auto_falls_back_to_mhd(self):
+        gw = FakeGateway(obd_ethanol=None, mhd_ethanol=55)
+        self.start(gw, "fuel", ("--ethanol", "auto"))
+        time.sleep(7)
+        _, level, ethanol, source, _ = self.fuel_frames()[-1]
+        self.assertEqual((ethanol, source), (550, 2))
         gw.close()
 
     def test_gear_not_starved_by_slow_dme(self):

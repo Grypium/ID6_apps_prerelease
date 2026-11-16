@@ -148,6 +148,18 @@ int main(void) {
             puts("FAIL guide text"); ++failures;
         }
     }
+    /* Ethanol sensor settling: steady for 30 s within 1.5 %, restarts on a move. */
+    {
+        fb_settle st;
+        memset(&st, 0, sizeof st);
+        CHECK(!fb_settle_update(&st, 30.0, 1000), "not settled at once");
+        CHECK(!fb_settle_update(&st, 30.8, 20000), "still settling");
+        CHECK(fb_settle_update(&st, 30.2, 31000), "settled after 30 s within the band");
+        CHECK(!fb_settle_update(&st, 34.0, 32000), "a move restarts it");
+        CHECK(!fb_settle_update(&st, 34.5, 61000), "29 s after the move");
+        CHECK(fb_settle_update(&st, 33.6, 62500), "settled again");
+        CHECK(!fb_settle_update(&st, 35.2, 63000), "range 33.6..35.2 is too wide");
+    }
     /* ShiftDeck converter lockup: hysteresis, slip must last three samples, idle, no data. */
     {
         lk_state k;

@@ -270,6 +270,23 @@ New hub clients send their own frames (`hub_frames.h`), so nothing else changes.
 All six hub copies (BoostDeck, ShiftDeck, PerfTimers, EngineTemps, FuelBlend workers)
 must be the same build: `phone/hub/update-hub.sh` replaces them together.
 
+## Ethanol sensor (flex fuel)
+
+Off until you create `ethanol-on` in the app's folder on the car (`Plugins/BoostDeck/` and/or
+`Plugins/FuelBlend/`). Its first word picks the source:
+
+- `obd` (default): standard OBD PID 52, ethanol %. A plain read.
+- `mhd`: MHD's monitor block (`2C 88 01`), as upstream BoostDeck reads it. Not a standard read service.
+- `auto`: OBD first, MHD if the DME doesn't answer PID 52.
+
+Find out which one your car answers, parked with the engine running: `phone/hub/ethanol-probe.py`
+(read-only; `--mhd` also tries the MHD request once).
+
+With the sensor on, Fuel Blend shows the measured blend. After "I filled up" it keeps the expected
+blend until half a gallon has been burned and the reading has held within 1.5 % for 30 s with the
+screen open, then learns the E85's real ethanol content from it. ShiftDeck's converter slip is
+corrected for the ~90 ms lag of OBD rpm and only shown when it lasts three samples.
+
 ## Tips and gotchas
 
 - QNX's shell on the head unit has no `printf`, `head` or `which`; use `print -r --`.

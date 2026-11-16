@@ -12,11 +12,19 @@
 // the tank has gone up by a gallon or more since then, the app reports the
 // fill and "I filled up" records what really went in: the planned E85 first,
 // the rest of the measured rise as pump gas.
+//
+// Ethanol sensor (opt-in: FuelBlend/ethanol-on, see ethanol_source.h): the hub
+// also reads the blend every five seconds while the screen is open. It becomes
+// the blend in the tank. After a recorded fill the sensor first still reads the
+// old fuel in the lines, so the app keeps the expected blend until half a gallon
+// has been burned and the reading has held steady for 30 s; then it learns the
+// E85's real content from that reading (as the calibration page does by hand).
 #include "plugin_factory.h"
 #include "diagnostic_worker.h"
 #include "fuel_blend.h"
 #include "hub_frames.h"
 #include "gauge_core.h"
+#include "ethanol_source.h"
 #include <arpa/inet.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,6 +35,7 @@ namespace {
 const char kSettings[] = "/var/opt/hmi/data/ID5/Plugins/FuelBlend/settings.txt";
 const char kSettingsTmp[] = "/var/opt/hmi/data/ID5/Plugins/FuelBlend/settings.tmp";
 const char kWorker[] = "/var/opt/hmi/data/ID5/Plugins/FuelBlend/fuel-hub-qnx";
+const char kEthanolFile[] = "/var/opt/hmi/data/ID5/Plugins/FuelBlend/ethanol-on";
 const unsigned kPoll = 0x46424c44u; // "FBLD"
 const double kFillDetectGallons = 1.0;
 
@@ -51,8 +60,9 @@ struct Setting { int value, low, high, step; };
 // FILL_*: the last fill, recorded by "I filled up" (amounts in tenths of a gallon).
 // LAST_TANK: the last live tank level seen (tenths of a gallon, -1 none);
 // FILL_TANK: fuel in the tank before the recorded fill (tenths, -1 = use FILL_LEVEL eighths).
+// SENSOR_WAIT: 1 = a fill was recorded and the sensor hasn't caught up with it yet.
 enum { LEVEL, CURRENT, TARGET, E85, GAS, FILL_LEVEL, FILL_BEFORE, FILL_E85, FILL_GAS, MEASURED,
-       LAST_TANK, FILL_TANK, SETTING_COUNT };
+       LAST_TANK, FILL_TANK, SENSOR_WAIT, SETTING_COUNT };
 const double kMinCalibrationE85 = 1.5; // gallons of E85 in the fill for a reliable answer
 }  // namespace
 
@@ -67,8 +77,55 @@ class FuelBlend : public bmw::PluginApp {
     double live_gallons_;   // tank level from the car
     double fill_from_;      // level before a detected fill (gallons), < 0 none
     double fill_to_;        // level when it was detected
+    uint64_t sensor_at_;    // last ethanol sensor reading (0 none)
+    double sensor_;         // % ethanol
+    fb_settle settle_;
+    char note_[96];         // one-off message for the top line (what the sensor taught us)
 
     bool live(uint64_t now) const { return live_at_ && now - live_at_ < FUEL_STALE_MS; }
+    bool sensorLive(uint64_t now) const { return sensor_at_ && now - sensor_at_ < ETHANOL_STALE_MS; }
+    // Gallons burned since the recorded fill, from the live level; < 0 unknown.
+    double usedSinceFill() const {
+        if (!live(bd_mono_ms()) || s_[FILL_TANK].value < 0) return -1;
+        double after = (s_[FILL_TANK].value + s_[FILL_E85].value + s_[FILL_GAS].value) / 10.0;
+        return after - live_gallons_;
+    }
+    // A new sensor reading: track it as the blend, or finish a fill once it has settled.
+    void sensorReading(double pct) {
+        uint64_t now = bd_mono_ms();
+        bool first = !sensorLive(now);
+        if (first) memset(&settle_, 0, sizeof settle_);
+        sensor_ = pct;
+        sensor_at_ = now;
+        bool settled = fb_settle_update(&settle_, pct, now);
+        bool changed = false;
+        if (s_[SENSOR_WAIT].value) {
+            if (settled && usedSinceFill() >= FB_SETTLE_USED) {
+                int v = static_cast<int>(pct + .5);
+                s_[MEASURED].value = v;
+                double e85;
+                if (s_[FILL_E85].value >= kMinCalibrationE85 * 10 && calibrated(e85)) {
+                    int learned = static_cast<int>(e85 + .5);
+                    if (learned < s_[E85].low) learned = s_[E85].low;
+                    if (learned > s_[E85].high) learned = s_[E85].high;
+                    snprintf(note_, sizeof note_, "Sensor reads E%d after the fill: your E85 is E%d (was set to E%d)",
+                             v, learned, s_[E85].value);
+                    s_[E85].value = learned;
+                } else {
+                    snprintf(note_, sizeof note_, "Sensor reads E%d after the fill", v);
+                }
+                s_[CURRENT].value = v;
+                s_[SENSOR_WAIT].value = 0;
+                changed = true;
+            }
+        } else if (fill_from_ < 0 && (pct - s_[CURRENT].value >= 1 || s_[CURRENT].value - pct >= 1)) {
+            s_[CURRENT].value = static_cast<int>(pct + .5); // whole steps, so jitter doesn't rewrite the file
+            changed = true;
+        }
+        if (changed) save();
+        if (first || changed || s_[SENSOR_WAIT].value) refresh();
+    }
+
     double inTank() const { return live(bd_mono_ms()) ? live_gallons_ : kTankGallons * s_[LEVEL].value / 8.0; }
     void reap() {
         if (child_ <= 0) return;
@@ -172,12 +229,18 @@ class FuelBlend : public bmw::PluginApp {
         if (fill_from_ >= 0)
             snprintf(line, sizeof line, "Fill detected: %.1f to %.1f gal. Press \"I filled up\" to record it.",
                      fill_from_, in_tank);
+        else if (note_[0]) snprintf(line, sizeof line, "%s", note_);
         text(80u, line);
         if (live(bd_mono_ms()))
             snprintf(line, sizeof line, "Fuel in tank: %.1f gal (%.0f%%), from the car", in_tank, in_tank / kTankGallons * 100);
         else snprintf(line, sizeof line, "Fuel in tank: %s (%.1f gal)", kEighths[s_[LEVEL].value], in_tank);
         text(81u, line);
-        snprintf(line, sizeof line, "Blend in tank now: E%d", s_[CURRENT].value);
+        if (sensorLive(bd_mono_ms()) && s_[SENSOR_WAIT].value)
+            snprintf(line, sizeof line, "Blend in tank now: E%d expected (sensor E%.0f, waiting for the new fuel)",
+                     s_[CURRENT].value, sensor_);
+        else if (sensorLive(bd_mono_ms()))
+            snprintf(line, sizeof line, "Blend in tank now: E%.0f, from the ethanol sensor", sensor_);
+        else snprintf(line, sizeof line, "Blend in tank now: E%d", s_[CURRENT].value);
         text(82u, line);
         snprintf(line, sizeof line, "Target blend: E%d", s_[TARGET].value);
         text(83u, line);
@@ -210,12 +273,21 @@ class FuelBlend : public bmw::PluginApp {
             snprintf(line, sizeof line, "Last fill: %s tank at E%d. Set what the pump showed and the blend measured.",
                      kEighths[s_[FILL_LEVEL].value], s_[FILL_BEFORE].value);
         else snprintf(line, sizeof line, "Press \"I filled up\" after a fill, then measure the blend after a short drive.");
+        if (s_[SENSOR_WAIT].value && sensorLive(bd_mono_ms())) {
+            double used = usedSinceFill();
+            if (used >= 0)
+                snprintf(line, sizeof line, "Sensor: waiting for the new fuel (%.1f of %.1f gal used since the fill)",
+                         used, FB_SETTLE_USED);
+            else snprintf(line, sizeof line, "Sensor: waiting for the new fuel to reach it");
+        }
         text(89u, line);
         snprintf(line, sizeof line, "E85 pumped: %.1f gal", s_[FILL_E85].value / 10.0);
         text(90u, line);
         snprintf(line, sizeof line, "91 pumped: %.1f gal", s_[FILL_GAS].value / 10.0);
         text(91u, line);
-        snprintf(line, sizeof line, "Measured blend now: E%d", s_[MEASURED].value);
+        if (sensorLive(bd_mono_ms()) && !s_[SENSOR_WAIT].value)
+            snprintf(line, sizeof line, "Measured blend now: E%.0f (ethanol sensor)", sensor_);
+        else snprintf(line, sizeof line, "Measured blend now: E%d", s_[MEASURED].value);
         text(92u, line);
         double e85;
         if (!recorded) line[0] = 0;
@@ -243,6 +315,8 @@ class FuelBlend : public bmw::PluginApp {
 
     void change(unsigned which, int direction) {
         if (which == LEVEL && live(bd_mono_ms())) return; // the car's level wins
+        if ((which == CURRENT || which == MEASURED) && sensorLive(bd_mono_ms()) && !s_[SENSOR_WAIT].value)
+            return; // so does the sensor
         Setting& s = s_[which];
         int v = s.value + direction * s.step;
         if (v < s.low) v = s.low;
@@ -277,6 +351,9 @@ class FuelBlend : public bmw::PluginApp {
         s_[CURRENT].value = static_cast<int>(result + 0.5);
         s_[LEVEL].value = measured ? static_cast<int>(after / kTankGallons * 8 + .5) : 8;
         if (measured) s_[LAST_TANK].value = static_cast<int>(after * 10 + .5);
+        // With the sensor on, it reports the new blend once the new fuel reaches it.
+        s_[SENSOR_WAIT].value = ethanol_mode(kEthanolFile) ? 1 : 0;
+        note_[0] = 0;
         fill_from_ = -1;
         save();
         refresh();
@@ -287,7 +364,7 @@ class FuelBlend : public bmw::PluginApp {
         bool visible;
         if (!event.readBool(visible) || visible == visible_) return true;
         visible_ = visible;
-        if (!visible) { stopChild(); live_at_ = 0; refresh(); }
+        if (!visible) { stopChild(); live_at_ = 0; sensor_at_ = 0; note_[0] = 0; refresh(); }
         else retry_at_ = 0;
         return true;
     }
@@ -303,7 +380,8 @@ public:
         if (visible_ && child_ <= 0 && now >= retry_at_) {
             char host[16];
             if (installed_gateway(host)) {
-                const char* args[] = {kWorker, "--host", host, "--client", "fuel", 0};
+                const char* mode = ethanol_mode(kEthanolFile);
+                const char* args[] = {kWorker, "--host", host, "--client", "fuel", mode ? "--ethanol" : 0, mode, 0};
                 child_ = launch(args, -1);
             }
             retry_at_ = now + 2000;
@@ -312,12 +390,13 @@ public:
             fuel_frame f;
             ssize_t n = recv(socket_, &f, sizeof f, 0);
             if (n <= 0) break;
-            if (n == static_cast<ssize_t>(sizeof f) && visible_ && f.sampled_ms <= now &&
-                f.level != HUB_NONE && f.level >= 0 && f.level <= 1000)
-                liveLevel(kTankGallons * f.level / 1000.0);
+            if (n != static_cast<ssize_t>(sizeof f) || !visible_ || f.sampled_ms > now) continue;
+            if (f.level != HUB_NONE && f.level >= 0 && f.level <= 1000) liveLevel(kTankGallons * f.level / 1000.0);
+            if (f.ethanol != HUB_NONE && f.ethanol >= 0 && f.ethanol <= 1000) sensorReading(f.ethanol / 10.0);
         }
         bool was_live = live_at_ != 0;
         if (was_live && !live(now)) { live_at_ = 0; refresh(); }
+        if (sensor_at_ && !sensorLive(now)) { sensor_at_ = 0; refresh(); }
         postPoll();
         return true;
     }
@@ -326,11 +405,13 @@ public:
               bmw::RHMIInterfaceVersion version, const bmw::Bundle& config, const bmw::Bundle& resources)
         : PluginApp(dispatcher, name, major, minor, version, config, resources),
           socket_(-1), child_(-1), generation_(0), visible_(false), retry_at_(0), live_at_(0),
-          live_gallons_(0), fill_from_(-1), fill_to_(0) {
+          live_gallons_(0), fill_from_(-1), fill_to_(0), sensor_at_(0), sensor_(0) {
+        memset(&settle_, 0, sizeof settle_);
+        note_[0] = 0;
         const Setting defaults[SETTING_COUNT] = {{2, 0, 8, 1}, {10, 0, 100, 1}, {30, 0, 85, 5},
                                                  {80, 40, 100, 1}, {10, 0, 15, 5},
                                                  {0, 0, 8, 1}, {0, 0, 100, 1}, {0, 0, 140, 1}, {0, 0, 140, 1},
-                                                 {0, 0, 100, 1}, {-1, -1, 140, 1}, {-1, -1, 140, 1}};
+                                                 {0, 0, 100, 1}, {-1, -1, 140, 1}, {-1, -1, 140, 1}, {0, 0, 1, 1}};
         for (unsigned i = 0; i < SETTING_COUNT; ++i) s_[i] = defaults[i];
         plan_.status = FB_INVALID;
     }

@@ -357,7 +357,8 @@ static int read_shift(void) {
 }
 
 /* --- rebuilt BoostDeck: torque, power, throttle (OBD), ethanol (MHD) */
-static int deck_obd_ok = 1, ethanol_on = 0;
+static int deck_obd_ok = 1, ethanol_on = 0; /* ethanol_on: 0 off, 1 obd, 2 mhd, 3 auto */
+static int ethanol_obd_ok = 1, ethanol_source = ETHANOL_NONE;
 static double ref_torque, deck_torque, deck_rpm, deck_throttle, ethanol_pct;
 static uint64_t deck_time, ethanol_time;
 
@@ -393,16 +394,53 @@ static int read_deck(void) {
     return 1;
 }
 
+/* Standard OBD PID 52, ethanol fuel %: A x 100 / 255. */
+static int read_ethanol_obd(void) {
+    static const unsigned char req[] = {0x01, 0x52}, prefix[] = {0x41, 0x52};
+    unsigned char reply[8];
+    unsigned negative;
+    int n = hub_read_ex(0x12, req, 2, prefix, 2, reply, sizeof reply, &negative, 1);
+    if (n == -1) return 0;
+    if (n == 3) {
+        ethanol_pct = reply[2] * 100 / 255.0;
+        ethanol_time = bd_mono_ms();
+        ethanol_source = ETHANOL_OBD;
+        return 1;
+    }
+    return -1;
+}
+
 /* MHD+ monitor block (as upstream BoostDeck reads it): the tune's active
-   ethanol %. Only with --ethanol. Any refusal just waits a minute. */
-static int read_ethanol(void) {
+   ethanol %. Only when asked for (--ethanol mhd/auto). Any refusal just waits a minute. */
+static int read_ethanol_mhd(void) {
     static const unsigned char query[] = {0x2c, 0x88, 0x01}, prefix[] = {0x6c, 0x88};
     unsigned char reply[38];
     unsigned negative;
     int n = hub_read_ex(0x12, query, sizeof query, prefix, sizeof prefix, reply, sizeof reply, &negative, 1);
     if (n == -1) return 0;
-    if (n == 38 && reply[17] <= 100) { ethanol_pct = reply[17]; ethanol_time = bd_mono_ms(); return 1; }
+    if (n == 38 && reply[17] <= 100) {
+        ethanol_pct = reply[17];
+        ethanol_time = bd_mono_ms();
+        ethanol_source = ETHANOL_MHD;
+        return 1;
+    }
     return -1; /* not available: caller backs off */
+}
+
+/* One ethanol reading from the chosen source; -1 = not available (back off). */
+static int read_ethanol(void) {
+    int r;
+    if (ethanol_on == 2) return read_ethanol_mhd();
+    if (ethanol_on == 1 || ethanol_obd_ok) {
+        r = read_ethanol_obd();
+        if (r < 0 && ethanol_on == 3) {
+            ethanol_obd_ok = 0; /* auto: the DME doesn't do PID 52, use MHD from now on */
+            if (trace_hub) fprintf(stderr, "hub: OBD ethanol (01 52) not answered; MHD block\n");
+            return 1;
+        }
+        return r;
+    }
+    return read_ethanol_mhd();
 }
 
 /* --- EGS (0x18): gear, turbine speed, wheel speeds */
@@ -598,6 +636,8 @@ static void send_fuel(int sock, struct sockaddr_in *dest, int paused) {
     memset(&f, 0, sizeof f);
     f.sampled_ms = now;
     f.level = paused ? HUB_NONE : fixed(fuel_pct, 10, fuel_time, now, FUEL_STALE_MS);
+    f.ethanol = paused || !ethanol_on ? HUB_NONE : fixed(ethanol_pct, 10, ethanol_time, now, ETHANOL_STALE_MS);
+    f.source = f.ethanol == HUB_NONE ? ETHANOL_NONE : ethanol_source;
     sendto(sock, &f, sizeof f, 0, (struct sockaddr *)dest, sizeof *dest);
 }
 
@@ -652,7 +692,13 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--deck-port") && i + 1 < (unsigned)argc) deck_out = number(argv[++i], 1, 65535);
         else if (!strcmp(argv[i], "--gear-port") && i + 1 < (unsigned)argc) gear_out = number(argv[++i], 1, 65535);
         else if (!strcmp(argv[i], "--fuel-port") && i + 1 < (unsigned)argc) fuel_out = number(argv[++i], 1, 65535);
-        else if (!strcmp(argv[i], "--ethanol")) ethanol_on = 1;
+        else if (!strcmp(argv[i], "--ethanol")) {
+            /* obd | mhd | auto; bare --ethanol (older BoostDeck plugin) = mhd */
+            const char *m = i + 1 < (unsigned)argc ? argv[i + 1] : "";
+            if (!strcmp(m, "obd")) { ethanol_on = 1; ++i; }
+            else if (!strcmp(m, "auto")) { ethanol_on = 3; ++i; }
+            else { ethanol_on = 2; if (!strcmp(m, "mhd")) ++i; }
+        }
         else if (!strcmp(argv[i], "--hub-port") && i + 1 < (unsigned)argc) control_port = number(argv[++i], 1, 65535);
         else if (!strcmp(argv[i], "--lock-port") && i + 1 < (unsigned)argc) lock_port = number(argv[++i], 1, 65535);
         else if (!strcmp(argv[i], "--guard-pause-ms") && i + 1 < (unsigned)argc) guard_pause_ms = number(argv[++i], 100, 600000);
@@ -660,7 +706,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--trace")) trace_hub = 1;
         else if (!strcmp(argv[i], "--no-trans")) {}
         else {
-            fprintf(stderr, "Usage: %s --host IPv4 [--session | --client boost|shift|timer|temps|deck|gear|fuel] [--ethanol] [--port 6801] [--trace]\n", argv[0]);
+            fprintf(stderr, "Usage: %s --host IPv4 [--session | --client boost|shift|timer|temps|deck|gear|fuel] [--ethanol obd|mhd|auto] [--port 6801] [--trace]\n", argv[0]);
             return 2;
         }
     }
@@ -732,7 +778,7 @@ int main(int argc, char **argv) {
             READY(T_TEMPS, wanted & C_TEMPS, due_temps)
             READY(T_TRANS, wanted & (C_BOOST | C_TEMPS), due_trans)
             READY(T_DECK, (wanted & C_DECK) && deck_obd_ok, due_deck)
-            READY(T_ETHANOL, (wanted & C_DECK) && ethanol_on, due_ethanol)
+            READY(T_ETHANOL, (wanted & (C_DECK | C_FUEL)) && ethanol_on, due_ethanol)
             READY(T_FAST, wanted & C_BOOST, due_fast)
 #undef READY
             switch (task) {

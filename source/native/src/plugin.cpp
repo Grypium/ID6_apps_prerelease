@@ -5,6 +5,7 @@
 #include "dial_scales.h"
 #include "diagnostic_worker.h"
 #include "hub_frames.h"
+#include "ethanol_source.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -34,7 +35,8 @@ const unsigned kActivePollIntervalMs = 25u;
 const unsigned kIdlePollIntervalMs = 250u;
 const char kCollector[] = "/var/opt/hmi/data/ID5/Plugins/BoostDeck/boostdeck-collector-qnx";
 const char kGatewayFile[] = "/var/opt/hmi/data/ID5/Plugins/BoostDeck/gateway-ip.txt";
-// Opt-in: the MHD ethanol read (2C 88 01) runs only when this file exists.
+// Opt-in: the ethanol read runs only when this file exists; its first word picks
+// the source (obd, mhd or auto; see ethanol_source.h).
 const char kEthanolFile[] = "/var/opt/hmi/data/ID5/Plugins/BoostDeck/ethanol-on";
 
 // Gateway address written by the installer next to the worker (one line, 169.254.x.x).
@@ -239,9 +241,8 @@ void BoostDeck::startVisibleCollector() {
     char host[16];
     retry_at_=bd_mono_ms()+2000;
     if (!installed_gateway(host)) return;
-    FILE* ethanol=fopen(kEthanolFile,"r");
-    if (ethanol) fclose(ethanol);
-    const char *args[]={kCollector,"--host",host,"--client","deck",ethanol ? "--ethanol" : 0,0};
+    const char* ethanol=ethanol_mode(kEthanolFile);
+    const char *args[]={kCollector,"--host",host,"--client","deck",ethanol ? "--ethanol" : 0,ethanol,0};
     collector_=launch(args,-1);
 }
 

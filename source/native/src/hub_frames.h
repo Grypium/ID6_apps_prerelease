@@ -41,11 +41,16 @@ struct timer_frame {
     int32_t driven;    /* 0.01 km/h */
 };
 
-/* FuelBlend: tank level (OBD 2F, % of tank), every two seconds. */
-enum { FUEL_PORT = 42869, FUEL_STALE_MS = 6000 };
+/* FuelBlend: tank level (OBD 2F, % of tank) every two seconds, and the
+   ethanol sensor reading when the app turned it on (see ethanol_source.h). */
+enum { FUEL_PORT = 42869, FUEL_STALE_MS = 6000, ETHANOL_STALE_MS = 15000 };
+enum { ETHANOL_NONE = 0, ETHANOL_OBD = 1, ETHANOL_MHD = 2 };
 struct fuel_frame {
     uint64_t sampled_ms;
     int32_t level;     /* 0.1 % of the tank, HUB_NONE if unknown */
+    int32_t ethanol;   /* 0.1 % ethanol, HUB_NONE if unknown or not turned on */
+    int32_t source;    /* ETHANOL_OBD (01 52) or ETHANOL_MHD (2C 88 01) */
+    int32_t spare;
 };
 
 /* EGS DA1D: four words, (raw - 0x7FFF) x WHEEL_KPH km/h; sign follows the
