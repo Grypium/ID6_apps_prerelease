@@ -2,11 +2,14 @@
 //
 // While the screen is visible it runs the shared diagnostic hub as client
 // "timer" (read-only, shared with the gauge apps, one gateway connection) and
-// times runs from the speed it sends to UDP 42865. Best times are kept in
-// best.txt beside the plugin. For closed courses only.
+// times runs from the speed it sends to UDP 42865: the undriven front wheels
+// (transmission's wheel-speed copy, ~16 a second), so rear wheelspin does not
+// flatter the times; OBD speed when wheel speeds are unavailable. Wheel slip =
+// driven vs front. Best times are kept in best.txt beside the plugin. For
+// closed courses only.
 #include "plugin_factory.h"
 #include "diagnostic_worker.h"
-#include "drive_frame.h"
+#include "hub_frames.h"
 #include "perf_timer.h"
 #include "gauge_core.h"
 #include <arpa/inet.h>
@@ -46,6 +49,8 @@ class PerfTimers : public bmw::PluginApp {
     bool visible_;
     uint64_t retry_at_, last_frame_, message_until_, base_;
     pt_state timer_;
+    double slip_, run_slip_;   // live and this run's peak wheel slip, %
+    bool wheels_, in_run_;
     char message_[96];
 
     void text(unsigned model, const char* value) { updateModel(model, bmw::BasicString<char>(value)); }
@@ -126,28 +131,47 @@ class PerfTimers : public bmw::PluginApp {
                             : "Hold still to arm...");
         }
         double run = pt_elapsed(&timer_, ms(now));
-        if (run > 0) snprintf(line, sizeof line, "Speed %.0f mph     Run %.1f s", v / PT_MPH, run);
-        else snprintf(line, sizeof line, "Speed %.0f mph", v / PT_MPH);
+        char slip[32] = "";
+        if (wheels_) snprintf(slip, sizeof slip, "     Wheel slip %.0f%%", slip_);
+        if (run > 0) snprintf(line, sizeof line, "Speed %.0f mph%s     Run %.1f s", v / PT_MPH, slip, run);
+        else snprintf(line, sizeof line, "Speed %.0f mph%s", v / PT_MPH, slip);
         text(81u, line);
     }
 
     void poll(uint64_t now) {
         for (unsigned i = 0; i < 16 && socket_ >= 0; ++i) {
-            drive_frame f;
+            timer_frame f;
             ssize_t n = recv(socket_, &f, sizeof f, 0);
             if (n <= 0) break;
             if (n != static_cast<ssize_t>(sizeof f) || !visible_ || f.sampled_ms > now ||
                 f.sampled_ms < base_ || f.kph > 400) continue;
+            const bool wheels = f.front != HUB_NONE && f.driven != HUB_NONE && f.front >= 0 &&
+                                f.front <= 40000 && f.driven >= 0 && f.driven <= 40000;
+            double v = f.kph < 0 ? -1.0 : static_cast<double>(f.kph);
+            wheels_ = wheels;
+            slip_ = 0;
+            if (wheels) {
+                v = f.front / 100.0;
+                // Slip as % of road speed; below 8 km/h the ratio means little.
+                if (v >= 8 && f.driven > f.front) slip_ = (f.driven - f.front) / static_cast<double>(f.front) * 100;
+            }
             last_frame_ = now;
-            pt_sample(&timer_, ms(f.sampled_ms), f.kph < 0 ? -1.0 : static_cast<double>(f.kph));
+            pt_sample(&timer_, ms(f.sampled_ms), v);
+            const bool running = timer_.phase == PT_LAUNCH || timer_.phase == PT_RUNNING || timer_.rolling;
+            if (running && !in_run_) run_slip_ = 0;
+            in_run_ = running;
+            if (running && slip_ > run_slip_) run_slip_ = slip_;
         }
         if (timer_.updated) {
             timer_.updated = 0;
+            const char* what = "Run recorded.";
             if (timer_.new_best) {
                 timer_.new_best = 0;
                 saveBest();
-                strcpy(message_, "New best time!");
-            } else strcpy(message_, "Run recorded.");
+                what = "New best time!";
+            }
+            if (wheels_) snprintf(message_, sizeof message_, "%s  Peak wheel slip %.0f%%.", what, run_slip_);
+            else snprintf(message_, sizeof message_, "%s", what);
             message_until_ = now + 5000;
             showResults();
         }
@@ -159,7 +183,7 @@ public:
                bmw::RHMIInterfaceVersion version, const bmw::Bundle& config, const bmw::Bundle& resources)
         : PluginApp(dispatcher, name, major, minor, version, config, resources),
           socket_(-1), child_(-1), generation_(0), visible_(false), retry_at_(0), last_frame_(0), message_until_(0),
-          base_(bd_mono_ms()) {
+          base_(bd_mono_ms()), slip_(0), run_slip_(0), wheels_(false), in_run_(false) {
         pt_init(&timer_);
         message_[0] = 0;
     }

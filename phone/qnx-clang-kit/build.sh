@@ -44,7 +44,11 @@ plugin MhdMaps "$SRC/src/mhd_maps.cpp" "-DPERF_LAB"
 if [ -f "$SRC/src/fault_codes.cpp" ]; then
   plugin FaultCodes "$SRC/src/fault_codes.cpp" ""
 fi
-[ -f "$SRC/src/fuel_blend.cpp" ] && plugin FuelBlend "$SRC/src/fuel_blend.cpp" ""
+if [ -f "$SRC/src/fuel_blend.cpp" ]; then
+  LIBS=(-l:libm.so.2 -l:libsocket.so.3 -l:libstdc++.so.6 -l:libc.so.3)
+  plugin FuelBlend "$SRC/src/fuel_blend.cpp" "" "$O/core.o"
+  LIBS=(-l:libstdc++.so.6 -l:libm.so.2 -l:libc.so.3)
+fi
 [ -f "$SRC/src/exhaust_flap.cpp" ] && plugin ExhaustFlap "$SRC/src/exhaust_flap.cpp" ""
 if [ -f "$SRC/src/perf_timers.cpp" ]; then
   LIBS=(-l:libm.so.2 -l:libsocket.so.3 -l:libstdc++.so.6 -l:libc.so.3)

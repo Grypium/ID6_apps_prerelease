@@ -1,6 +1,8 @@
 #include "plugin_factory.h"
 #include "diagnostic_worker.h"
 #include "drive_frame.h"
+#include "hub_frames.h"
+#include "lockup.h"
 #include "gauge_core.h"
 #include "shift_assets.h"
 #include <arpa/inet.h>
@@ -11,6 +13,22 @@
 namespace {
 const unsigned kShiftPoll=0x53484654u;
 const char kShiftWorker[]="/var/opt/hmi/data/ID5/Plugins/ShiftDeck/shift-deck-qnx";
+const unsigned kGearModel=74u, kConverterModel=75u;
+
+// Gateway address written by the installer next to the worker (one line, 169.254.x.x).
+bool installed_gateway(char (&host)[16]) {
+    FILE* file=fopen("/var/opt/hmi/data/ID5/Plugins/ShiftDeck/gateway-ip.txt","r");
+    if (!file) return false;
+    char line[32];
+    bool valid=fgets(line,sizeof line,file)!=NULL && fgetc(file)==EOF;
+    fclose(file);
+    if (!valid) return false;
+    line[strcspn(line,"\r\n")]=0;
+    struct in_addr address;
+    if (inet_pton(AF_INET,line,&address)!=1 || (ntohl(address.s_addr)>>16)!=0xa9feu) return false;
+    strcpy(host,line);
+    return true;
+}
 #ifdef NATIVE_SHIFT_SMOOTH
 const unsigned kSweepSteps=128, kSweepBase=56400, kSweepAlert=56529;
 const unsigned kEaseMs=50;
@@ -18,7 +36,10 @@ const unsigned kEaseMs=50;
 }
 
 class ShiftDeck : public bmw::PluginApp {
-    int socket_;
+    int socket_, gear_socket_;
+    gear_frame gear_;
+    lk_state lockup_;
+    char gear_text_[24], converter_text_[24];
     pid_t child_;
     unsigned generation_;
     bool visible_;
@@ -54,6 +75,19 @@ class ShiftDeck : public bmw::PluginApp {
         ++generation_;
         stopChild();
         if (socket_>=0) { close(socket_); socket_=-1; }
+        if (gear_socket_>=0) { close(gear_socket_); gear_socket_=-1; }
+    }
+    void showGear(uint64_t now) {
+        char gear[24], converter[24];
+        bool live=visible_ && gear_.sampled_ms && gear_.sampled_ms<=now && now-gear_.sampled_ms<GEAR_STALE_MS;
+        if (live) lk_update(&lockup_,gear_.rpm,gear_.turbine,gear_.gear,gear,sizeof gear,converter,sizeof converter);
+        else {
+            memset(&lockup_,0,sizeof lockup_);
+            strcpy(gear,"Gear --");
+            strcpy(converter,"--");
+        }
+        if (strcmp(gear,gear_text_)) { label(kGearModel,gear); strcpy(gear_text_,gear); }
+        if (strcmp(converter,converter_text_)) { label(kConverterModel,converter); strcpy(converter_text_,converter); }
     }
     void postPoll() {
         bmw::Parcel data;
@@ -126,12 +160,14 @@ class ShiftDeck : public bmw::PluginApp {
         if (!event.readBool(show) || show==visible_) return true;
         visible_=show;
         frame_.sampled_ms=0;
+        gear_.sampled_ms=0;
 #ifdef NATIVE_SHIFT_SMOOTH
         rpm_started_=0;
 #endif
         if (show) retry_at_=0;
         else stopChild();
         draw(bd_mono_ms());
+        showGear(bd_mono_ms());
         return true;
     }
     template <unsigned Index> bool setTarget(const bmw::Parcel&) {
@@ -160,10 +196,13 @@ class ShiftDeck : public bmw::PluginApp {
 public:
     ShiftDeck(bmw::IDispatcher& d,bmw::BasicString<char> name,unsigned maj,unsigned min,
               bmw::RHMIInterfaceVersion version,const bmw::Bundle& cfg,const bmw::Bundle& res)
-        : PluginApp(d,name,maj,min,version,cfg,res),socket_(-1),child_(-1),generation_(0),
+        : PluginApp(d,name,maj,min,version,cfg,res),socket_(-1),gear_socket_(-1),child_(-1),generation_(0),
           visible_(false),target_(kDefaultTarget),retry_at_(0),bar_(0),lights_(0),
           rpm_(-2),kph_(-2),shift_(false) {
         memset(&frame_,0,sizeof frame_);
+        memset(&gear_,0,sizeof gear_);
+        memset(&lockup_,0,sizeof lockup_);
+        gear_text_[0]=converter_text_[0]=0;
 #ifdef NATIVE_SHIFT_SMOOTH
         metric_=false;
         rpm_from_=0;
@@ -192,6 +231,21 @@ public:
                 socket_=-1;
             }
         }
+        gear_socket_=socket(AF_INET,SOCK_DGRAM,0);
+        if (gear_socket_>=0) {
+            struct sockaddr_in address;
+            memset(&address,0,sizeof address);
+            address.sin_family=AF_INET;
+            address.sin_port=htons(GEAR_PORT);
+            address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+            if (fcntl(gear_socket_,F_SETFL,O_NONBLOCK)<0 || fcntl(gear_socket_,F_SETFD,FD_CLOEXEC)<0 ||
+                bind(gear_socket_,reinterpret_cast<struct sockaddr*>(&address),sizeof address)<0) {
+                close(gear_socket_);
+                gear_socket_=-1;
+            }
+        }
+        memset(&gear_,0,sizeof gear_);
+        gear_text_[0]=converter_text_[0]=0;
         typedef bmw::Delegate<bool,const bmw::Parcel&> Action;
         Action action;
         action.m_obj=this;
@@ -217,6 +271,7 @@ public:
         updateModel(57u,bmw::ImageID(kShiftOff));
         showTarget();
         draw(bd_mono_ms());
+        showGear(bd_mono_ms());
         if (socket_>=0) postPoll();
         return true;
     }
@@ -228,10 +283,21 @@ public:
         reap();
         uint64_t now=bd_mono_ms();
         if (visible_ && child_<=0 && now>=retry_at_) {
-            const char* args[]={kShiftWorker,"--host","169.254.21.3",0};
-            child_=launch(args,-1);
+            char host[16];
+            if (installed_gateway(host)) {
+                const char* args[]={kShiftWorker,"--host",host,"--client","gear",0};
+                child_=launch(args,-1);
+            }
             retry_at_=now+1000;
         }
+        for (unsigned i=0;gear_socket_>=0 && i<8;++i) {
+            gear_frame next;
+            ssize_t n=recv(gear_socket_,&next,sizeof next,0);
+            if (n<=0) break;
+            if (n==static_cast<ssize_t>(sizeof next) && visible_ && next.sampled_ms<=now &&
+                next.sampled_ms>=gear_.sampled_ms) gear_=next;
+        }
+        showGear(now);
         for (unsigned i=0;i<8;++i) {
             drive_frame next;
             ssize_t n=recv(socket_,&next,sizeof next,0);

@@ -4,6 +4,7 @@
 #include "gauge_core.h"
 #include "dial_scales.h"
 #include "diagnostic_worker.h"
+#include "hub_frames.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -31,8 +32,35 @@ const unsigned kDataUpdateMessage = 0x40000003u;
 const unsigned kPollKey = 0x4244504cu; // BDPL, private to this app
 const unsigned kActivePollIntervalMs = 25u;
 const unsigned kIdlePollIntervalMs = 250u;
-const char kGateway[] = "169.254.21.3";
 const char kCollector[] = "/var/opt/hmi/data/ID5/Plugins/BoostDeck/boostdeck-collector-qnx";
+const char kGatewayFile[] = "/var/opt/hmi/data/ID5/Plugins/BoostDeck/gateway-ip.txt";
+// Opt-in: the MHD ethanol read (2C 88 01) runs only when this file exists.
+const char kEthanolFile[] = "/var/opt/hmi/data/ID5/Plugins/BoostDeck/ethanol-on";
+
+// Gateway address written by the installer next to the worker (one line, 169.254.x.x).
+bool installed_gateway(char (&host)[16]) {
+    FILE* file = fopen(kGatewayFile, "r");
+    if (!file) return false;
+    char line[32];
+    bool valid = fgets(line, sizeof line, file) != NULL && fgetc(file) == EOF;
+    fclose(file);
+    if (!valid) return false;
+    line[strcspn(line, "\r\n")] = 0;
+    struct in_addr address;
+    if (inet_pton(AF_INET, line, &address) != 1 || (ntohl(address.s_addr) >> 16) != 0xa9feu) return false;
+    strcpy(host, line);
+    return true;
+}
+
+// Third row (hub "deck" frames). Bars run over these imperial ranges.
+enum { kExtraCount = 4 };
+const struct ExtraScale { double minimum, maximum; } kExtraScales[kExtraCount] = {
+    {0, 500},   // power, hp
+    {0, 500},   // torque, lb-ft
+    {0, 100},   // throttle, %
+    {100, 300}  // oil temperature, F
+};
+const unsigned kExtraLabelModel = 70u, kExtraBarModel = 74u, kExtraBarComponent = 210u;
 const unsigned kBarCount = sizeof(kDialScales)/sizeof(kDialScales[0]);
 #ifdef PERF_LAB
 typedef char dial_count_check[kBarCount + 1 == BD_COUNT ? 1 : -1];
@@ -60,7 +88,13 @@ class BoostDeck : public bmw::PluginApp {
     void selectColor(unsigned color);
     char labels_[BD_COUNT][128];
     unsigned images_[BD_COUNT];
+    int deck_fd_;
+    deck_frame deck_;
+    uint64_t deck_at_;
+    char extra_labels_[kExtraCount][48];
+    unsigned extra_images_[kExtraCount];
     void postPoll();
+    void refreshExtras();
 public:
     BoostDeck(bmw::IDispatcher& d, bmw::BasicString<char> name, unsigned maj, unsigned mn,
               bmw::RHMIInterfaceVersion rhmi, const bmw::Bundle& cfg, const bmw::Bundle& res)
@@ -70,7 +104,7 @@ public:
 #ifdef PERF_LAB
           metric_(false),
 #endif
-          retry_at_(0) {
+          retry_at_(0), deck_fd_(-1) {
         resetDisplay();
     }
     virtual ~BoostDeck() { shutdown(); }
@@ -108,11 +142,14 @@ public:
         gauges_visible_=false;
         stopCollector();
         if (fd_>=0) { close(fd_); fd_=-1; }
+        if (deck_fd_>=0) { close(deck_fd_); deck_fd_=-1; }
     }
     void resetDisplay() {
         memset(&frame_,0,sizeof frame_); memset(labels_,0,sizeof labels_);
         memset(images_,0,sizeof images_);
-        received_=0;
+        memset(&deck_,0,sizeof deck_); memset(extra_labels_,0,sizeof extra_labels_);
+        memset(extra_images_,0,sizeof extra_images_);
+        received_=0; deck_at_=0;
     }
     void refresh();
     void poll();
@@ -128,6 +165,13 @@ bool BoostDeck::onInit() {
     if (fd_>=0 && (fcntl(fd_,F_SETFL,O_NONBLOCK)<0 || fcntl(fd_,F_SETFD,FD_CLOEXEC)<0 ||
         bind(fd_,reinterpret_cast<struct sockaddr*>(&a),sizeof a)<0)) {
         close(fd_); fd_=-1;
+    }
+    deck_fd_=socket(AF_INET,SOCK_DGRAM,0);
+    memset(&a,0,sizeof a); a.sin_family=AF_INET; a.sin_port=htons(DECK_PORT);
+    a.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+    if (deck_fd_>=0 && (fcntl(deck_fd_,F_SETFL,O_NONBLOCK)<0 || fcntl(deck_fd_,F_SETFD,FD_CLOEXEC)<0 ||
+        bind(deck_fd_,reinterpret_cast<struct sockaddr*>(&a),sizeof a)<0)) {
+        close(deck_fd_); deck_fd_=-1;
     }
     bmw::Delegate<bool,const bmw::Parcel&> action;
     action.m_obj=this;
@@ -163,6 +207,7 @@ bool BoostDeck::onInit() {
     selectColor(color_);
     bmw::Parcel visible(true);
     for (unsigned i=0;i<kBarCount;++i) setProperty(200u+i,3u,visible);
+    for (unsigned i=0;i<kExtraCount;++i) setProperty(kExtraBarComponent+i,3u,visible);
     refresh();
     if (fd_>=0) {
         ++poll_generation_;
@@ -180,8 +225,9 @@ bool BoostDeck::gaugeVisibility(const bmw::Parcel& event) {
         startVisibleCollector();
     } else {
         stopCollector();
-        received_=0;
+        received_=0; deck_at_=0;
         memset(&frame_,0,sizeof frame_);
+        memset(&deck_,0,sizeof deck_);
         refresh();
     }
     return true;
@@ -190,13 +236,13 @@ bool BoostDeck::gaugeVisibility(const bmw::Parcel& event) {
 void BoostDeck::startVisibleCollector() {
     if (!gauges_visible_ || collector_>0 || fd_<0 ||
         bd_mono_ms()<retry_at_) return;
-    const char *args[]={kCollector,"--host",kGateway,"--session",
-#ifdef PERF_LAB
-                       "--ethanol",
-#endif
-                       0};
-    collector_=launch(args,-1);
+    char host[16];
     retry_at_=bd_mono_ms()+2000;
+    if (!installed_gateway(host)) return;
+    FILE* ethanol=fopen(kEthanolFile,"r");
+    if (ethanol) fclose(ethanol);
+    const char *args[]={kCollector,"--host",host,"--client","deck",ethanol ? "--ethanol" : 0,0};
+    collector_=launch(args,-1);
 }
 
 void BoostDeck::selectColor(unsigned color) {
@@ -240,6 +286,16 @@ void BoostDeck::poll() {
             next.sent_ms && next.sent_ms<=bd_mono_ms() &&
             (!received_ || next.sent_ms>=received_)) {
             frame_=next; received_=next.sent_ms; // queued UDP does not reset sample age
+        }
+    }
+    for (unsigned n=0;deck_fd_>=0 && n<8;++n) {
+        deck_frame next;
+        ssize_t k=recv(deck_fd_,&next,sizeof next,0);
+        if (k<=0) break;
+        const uint64_t now=bd_mono_ms();
+        if (k==static_cast<ssize_t>(sizeof next) && gauges_visible_ && !stopping_ &&
+            next.sampled_ms && next.sampled_ms<=now && next.sampled_ms>=deck_.sampled_ms) {
+            deck_=next; deck_at_=next.sampled_ms;
         }
     }
     refresh();
@@ -294,12 +350,13 @@ void BoostDeck::refresh() {
         }
     }
 #ifdef PERF_LAB
-    const bool valid = received_ && bd_is_fresh(&frame_,BD_ETHANOL,elapsed) &&
-        frame_.value[BD_ETHANOL]>=0 && frame_.value[BD_ETHANOL]<=100;
+    const bool deck_live = deck_at_ && bd_mono_ms()-deck_at_ < DECK_STALE_MS;
+    const double ethanol_pct = deck_.ethanol/10.;
+    const bool valid = deck_live && deck_.ethanol!=HUB_NONE && ethanol_pct>=0 && ethanol_pct<=100;
     char ethanol[128];
-    if (valid) snprintf(ethanol,sizeof ethanol,"%.0f%%",frame_.value[BD_ETHANOL]);
+    if (valid) snprintf(ethanol,sizeof ethanol,"%.0f%%",ethanol_pct);
     else strcpy(ethanol,"--");
-    const unsigned step=valid ? static_cast<unsigned>(frame_.value[BD_ETHANOL]*kEthanolSteps/100.+.5) : 0;
+    const unsigned step=valid ? static_cast<unsigned>(ethanol_pct*kEthanolSteps/100.+.5) : 0;
     const unsigned ethanolImage=kEthanolFirst+(step ? color_*kEthanolSteps+step : 0);
     if (images_[BD_ETHANOL]!=ethanolImage) {
         updateModel(68u,bmw::ImageID(ethanolImage));
@@ -309,8 +366,50 @@ void BoostDeck::refresh() {
         updateModel(58u,bmw::BasicString<char>(ethanol));
         strcpy(labels_[BD_ETHANOL],ethanol);
     }
+    refreshExtras();
 #endif
 }
+
+#ifdef PERF_LAB
+// Third row: power, torque, throttle, oil temperature (hub "deck" frames).
+void BoostDeck::refreshExtras() {
+    const bool live = deck_at_ && bd_mono_ms()-deck_at_ < DECK_STALE_MS;
+    const int32_t raw[kExtraCount] = {deck_.power, deck_.torque, deck_.throttle, deck_.oil_temp};
+    for (unsigned i=0;i<kExtraCount;++i) {
+        char label[48];
+        unsigned image=kBarFirst;
+        if (live && raw[i]!=HUB_NONE) {
+            const double x=raw[i]/10.;
+            double imperial=x, shown=x;
+            const char* format="%.0f %s";
+            const char* unit="%";
+            switch (i) {
+            case 0: imperial=x*1.34102; shown=metric_ ? x : imperial; unit=metric_ ? "kW" : "hp"; break;
+            case 1: imperial=x*.737562; shown=metric_ ? x : imperial; unit=metric_ ? "Nm" : "lb-ft"; break;
+            case 2: format="%.0f%s"; break;
+            default: imperial=x*1.8+32; shown=metric_ ? x : imperial; format="%.1f %s"; unit=metric_ ? "\260C" : "\260F";
+            }
+            snprintf(label,sizeof label,format,shown,unit);
+            double fraction=(imperial-kExtraScales[i].minimum)/(kExtraScales[i].maximum-kExtraScales[i].minimum);
+            if (fraction<0) fraction=0;
+            if (fraction>1) fraction=1;
+            const unsigned bar=static_cast<unsigned>(fraction*kDialSteps+.5);
+            if (bar) {
+                const unsigned palette = color_ == kMulticolor ? kMulticolor + (kBarCount+i)%kMulticolor : color_;
+                image += palette*kDialSteps+bar;
+            }
+        } else strcpy(label,"--");
+        if (image!=extra_images_[i]) {
+            updateModel(kExtraBarModel+i,bmw::ImageID(image));
+            extra_images_[i]=image;
+        }
+        if (strcmp(label,extra_labels_[i])) {
+            updateModel(kExtraLabelModel+i,bmw::BasicString<char>(label));
+            strcpy(extra_labels_[i],label);
+        }
+    }
+}
+#endif
 
 extern "C" {
 PluginAppInfo pluginAppInfo = {1, "BoostDeck", "owner-development", 1,

@@ -238,6 +238,38 @@ are unchanged. Oil `4408` was checked against the dash (110 C vs 108.8 C read).
 All installed hub copies must be the same version (an older owner ignores newer
 clients): update them together with `phone/hub/update-hub.sh`.
 
+## Rebuilt BoostDeck and ShiftDeck, live data in Perf Timers and Fuel Blend
+
+These replace the installed official BoostDeck and ShiftDeck with builds of the newer
+source (`plugin.cpp` with `-DPERF_LAB`, `shift_deck.cpp`), changed as follows. Both read
+the gateway address from `gateway-ip.txt` (the newer source had `169.254.21.3` built in).
+New hub clients send their own frames (`hub_frames.h`), so nothing else changes.
+
+- **BoostDeck**: three rows of four gauges plus the Active Ethanol bar
+  (`tools/make_boostdeck.py` writes the layout and art; the bars match the published
+  ones pixel for pixel). Row three: estimated power (torque x rpm), torque (OBD `62` x
+  reference torque `63`), throttle (OBD `11`) and oil temperature (DME `4408`). Hub client
+  `deck`: one extra OBD request about three times a second, oil temp rides in the 1 s
+  group, frames to UDP 42867. Active Ethanol uses MHD's monitor read (`2C 88 01`) and is
+  off unless `BoostDeck/ethanol-on` exists on the head unit (for when the ECA is fitted).
+- **ShiftDeck**: gear and torque converter state left of the RPM digits ("Gear 4",
+  "Locked" / "Slip 250 rpm" / "Open"). Slip = engine rpm (OBD) - turbine rpm (EGS `DA34`);
+  locked under 40 rpm, unlocked over 90 (median of three, `lockup.h`). Hub client `gear`:
+  EGS `DA2E` + `DA34` in one request five times a second, frames to UDP 42868.
+- **Perf Timers**: speed from the two slowest wheels (EGS `DA1D`, the transmission's copy
+  of the four wheel speeds, ~16 a second); on a rear-drive car those are the undriven
+  fronts, so wheelspin doesn't flatter the times. Shows live wheel slip (driven vs front)
+  and the peak slip of each run. Falls back to OBD speed if `DA1D` is refused. Scale
+  0.01728 km/h per count was fitted against DSC `DBE4` at low speed; check it at speed.
+- **Fuel Blend**: while the main screen is open, the hub's `fuel` client reads the tank
+  level (OBD `2F`) every two seconds and it replaces the manual level. The app remembers
+  the last level; when the tank has risen a gallon or more, it reports the fill, and "I
+  filled up" records the planned E85 plus the rest of the measured rise as pump gas. Open
+  Fuel Blend before switching off at the pump so the pre-fill level is current.
+
+All six hub copies (BoostDeck, ShiftDeck, PerfTimers, EngineTemps, FuelBlend workers)
+must be the same build: `phone/hub/update-hub.sh` replaces them together.
+
 ## Tips and gotchas
 
 - QNX's shell on the head unit has no `printf`, `head` or `which`; use `print -r --`.

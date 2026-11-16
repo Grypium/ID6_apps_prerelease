@@ -7,6 +7,11 @@
  *   ShiftDeck: --host IP                -> client "shift" (drive frames, UDP 42863)
  *   PerfTimers: --host IP --client timer -> client "timer" (drive frames, UDP 42865)
  *   EngineTemps: --host IP --client temps -> client "temps" (temps frames, UDP 42866)
+ *   rebuilt BoostDeck: --client deck  -> "boost" + deck frames (oil temp, torque,
+ *                       power, throttle; UDP 42867)
+ *   rebuilt ShiftDeck: --client gear  -> "shift" + gear frames (gear, turbine rpm; UDP 42868)
+ *   PerfTimers also gets wheel speeds from the transmission (EGS DA1D).
+ *   FuelBlend:  --client fuel  -> tank level (OBD 2F) every 2 s (UDP 42869)
  *
  * Rules, so the gauges never crowd out the car's own systems or other tools:
  *   - Only one process talks to the car. The first instance binds the hub
@@ -28,6 +33,7 @@
  */
 #include "drive_frame.h"
 #include "temps_frame.h"
+#include "hub_frames.h"
 
 enum {
     hub_port = 42864,          /* loopback control port: heartbeats */
@@ -42,13 +48,20 @@ enum {
     timer_port = 42865,
     temps_ms = 1000,           /* oil, coolant, intake air: one request a second */
     trans_stale_ms = 5000,
+    deck_ms = 300,             /* torque, throttle (and rpm for power) */
+    gear_ms = 200,             /* EGS: gear + turbine speed */
+    wheel_ms = 60,             /* EGS: wheel speeds for the timers (EGS answers in ~3 ms) */
+    timer_obd_ms = 250,        /* OBD speed, fallback for the timers */
+    ethanol_ms = 5000,
+    fuel_ms = 2000,
+    ethanol_retry_ms = 60000,
     guard_period_ms = 2000,
     yield_ms = 3000,
     request_timeout_ms = 300,
     max_backoff_ms = 60000
 };
 
-enum { C_BOOST = 1, C_SHIFT = 2, C_TIMER = 4, C_TEMPS = 8 };
+enum { C_BOOST = 1, C_SHIFT = 2, C_TIMER = 4, C_TEMPS = 8, C_DECK = 16, C_GEAR = 32, C_FUEL = 64, C_LAST = C_FUEL };
 
 static unsigned guard_pause_ms = 30000;
 static unsigned lock_port = DIAGNOSTIC_PORT;
@@ -146,8 +159,9 @@ static void failed(void) {
 
 /* One read request. Returns reply length, -2 for a negative answer, or -1
  * (connection dropped; already paused). */
-static int hub_read(unsigned ecu, const unsigned char *uds, unsigned n, const unsigned char *prefix,
-                    unsigned prefix_n, unsigned char *reply, unsigned size, unsigned *negative) {
+static int hub_read_ex(unsigned ecu, const unsigned char *uds, unsigned n, const unsigned char *prefix,
+                       unsigned prefix_n, unsigned char *reply, unsigned size, unsigned *negative,
+                       int tolerant) {
     uint64_t start = bd_mono_ms(), took;
     int rc;
     last_request = start;
@@ -160,12 +174,17 @@ static int hub_read(unsigned ecu, const unsigned char *uds, unsigned n, const un
         fprintf(stderr, "hub: req ecu=%02X sid=%02X len=%u rc=%d nrc=%02X took=%llu\n",
                 ecu, uds[0], n, rc, rc == -2 ? *negative : 0, (unsigned long long)took);
     if (rc == -1) { failed(); return -1; }
-    if (rc == -2 && (*negative == 0x21 || *negative == 0x22 || *negative == 0x7f)) {
+    if (rc == -2 && !tolerant && (*negative == 0x21 || *negative == 0x22 || *negative == 0x7f)) {
         failed(); /* busy / wrong conditions / wrong session: someone else is working */
         return -2;
     }
     backoff_ms = 0;
     return rc;
+}
+
+static int hub_read(unsigned ecu, const unsigned char *uds, unsigned n, const unsigned char *prefix,
+                    unsigned prefix_n, unsigned char *reply, unsigned size, unsigned *negative) {
+    return hub_read_ex(ecu, uds, n, prefix, prefix_n, reply, size, negative, 0);
 }
 
 /* --- signals */
@@ -174,6 +193,8 @@ static const int fast_slot[] = {BD_BOOST, BD_AFR, BD_TIMING, BD_RAIL, BD_OIL};
 static const unsigned slow_dids[] = {0x4201, 0x580f, 0x4300};
 static const int slow_slot[] = {-1, BD_IAT, BD_COOLANT}; /* 4201 = ambient, used for boost */
 
+static const unsigned deck_slow_dids[] = {0x4201, 0x580f, 0x4300, 0x4408}; /* + oil temp */
+static const int deck_slow_slot[] = {-1, BD_IAT, BD_COOLANT, -1};
 static const unsigned temps_dids[] = {0x4408, 0x4300, 0x580f};
 static const int temps_slot[] = {-1, BD_COOLANT, BD_IAT}; /* 4408 = oil, kept outside the BoostDeck frame */
 
@@ -294,6 +315,132 @@ static int read_shift(void) {
     return 1;
 }
 
+/* --- rebuilt BoostDeck: torque, power, throttle (OBD), ethanol (MHD) */
+static int deck_obd_ok = 1, ethanol_on = 0;
+static double ref_torque, deck_torque, deck_rpm, deck_throttle, ethanol_pct;
+static uint64_t deck_time, ethanol_time;
+
+static unsigned pid_size(unsigned pid) { return pid == 0x0c || pid == 0x63 ? 2u : 1u; }
+
+static int read_deck(void) {
+    /* 01 0C 11 62 (63): rpm, throttle, actual torque %, reference torque until known. */
+    unsigned char req[] = {0x01, 0x0c, 0x11, 0x62, 0x63}, prefix[] = {0x41}, reply[32];
+    unsigned negative, at = 1, n_req = ref_torque > 0 ? 4u : 5u;
+    int n = hub_read(0x12, req, n_req, prefix, 1, reply, sizeof reply, &negative), got = 0;
+    double torque = -1, rpm = -1, throttle = -1;
+    if (n == -1) return 0;
+    if (n == -2) {
+        if (!(paused_until > bd_mono_ms())) deck_obd_ok = 0; /* refused: stop asking */
+        return 1;
+    }
+    while (n > 0 && at < (unsigned)n) {
+        unsigned pid = reply[at], size = pid_size(pid), a;
+        if (at + 1 + size > (unsigned)n) break;
+        a = reply[at + 1];
+        if (pid == 0x0c) { rpm = (a * 256 + reply[at + 2]) / 4.0; ++got; }
+        else if (pid == 0x11) { throttle = a * 100 / 255.0; ++got; }
+        else if (pid == 0x62) { torque = (double)a - 125; ++got; }
+        else if (pid == 0x63) { unsigned r = a * 256 + reply[at + 2]; if (r >= 100 && r <= 2000) ref_torque = r; }
+        at += 1 + size;
+    }
+    if (got == 3 && ref_torque > 0) {
+        deck_torque = torque / 100 * ref_torque;
+        deck_rpm = rpm;
+        deck_throttle = throttle;
+        deck_time = bd_mono_ms();
+    }
+    return 1;
+}
+
+/* MHD+ monitor block (as upstream BoostDeck reads it): the tune's active
+   ethanol %. Only with --ethanol. Any refusal just waits a minute. */
+static int read_ethanol(void) {
+    static const unsigned char query[] = {0x2c, 0x88, 0x01}, prefix[] = {0x6c, 0x88};
+    unsigned char reply[38];
+    unsigned negative;
+    int n = hub_read_ex(0x12, query, sizeof query, prefix, sizeof prefix, reply, sizeof reply, &negative, 1);
+    if (n == -1) return 0;
+    if (n == 38 && reply[17] <= 100) { ethanol_pct = reply[17]; ethanol_time = bd_mono_ms(); return 1; }
+    return -1; /* not available: caller backs off */
+}
+
+/* --- EGS (0x18): gear, turbine speed, wheel speeds */
+static int egs_multi_ok = 1, wheels_ok = 1;
+static int32_t gear_now;
+static double turbine_rpm;
+static uint64_t gear_time;
+static double wheel_front, wheel_driven;
+static uint64_t wheel_time;
+
+static void store_egs(unsigned did, const unsigned char *p) {
+    unsigned w = p[0] * 256u + p[1];
+    if (did == 0xda2e) { gear_now = w >= 1 && w <= 8 ? (int32_t)w : w == 0x0a ? -1 : 0; gear_time = bd_mono_ms(); }
+    else if (w < 16000) turbine_rpm = w; /* DA34 */
+}
+
+static int read_gear(void) {
+    unsigned char reply[32], req[5] = {0x22, 0xda, 0x2e, 0xda, 0x34}, prefix[3] = {0x62, 0xda, 0x2e};
+    unsigned negative;
+    int n;
+    if (egs_multi_ok) {
+        n = hub_read(0x18, req, 5, prefix, 3, reply, sizeof reply, &negative);
+        if (n == -1) return 0;
+        if (n == 9 && reply[5] == 0xda && reply[6] == 0x34) {
+            store_egs(0xda2e, reply + 3);
+            store_egs(0xda34, reply + 7);
+            return 1;
+        }
+        if (!(n == -2 && negative == 0x21)) {
+            egs_multi_ok = 0;
+            if (trace_hub) fprintf(stderr, "hub: EGS multi-DID read not accepted; single reads\n");
+        }
+        return 1;
+    }
+    n = hub_read(0x18, req, 3, prefix, 3, reply, sizeof reply, &negative);
+    if (n == -1) return 0;
+    if (n == 5) store_egs(0xda2e, reply + 3);
+    while (running && !may_send()) {
+        if (bd_mono_ms() < paused_until) return 1;
+        nap(5);
+    }
+    req[2] = 0x34; prefix[2] = 0x34;
+    n = hub_read(0x18, req, 3, prefix, 3, reply, sizeof reply, &negative);
+    if (n == -1) return 0;
+    if (n == 5) store_egs(0xda34, reply + 3);
+    return 1;
+}
+
+static int read_wheels(void) {
+    static const unsigned char req[] = {0x22, 0xda, 0x1d}, prefix[] = {0x62, 0xda, 0x1d};
+    unsigned char reply[16];
+    unsigned negative, i;
+    double w[4];
+    int n = hub_read(0x18, req, 3, prefix, 3, reply, sizeof reply, &negative);
+    if (n == -1) return 0;
+    if (n != 11) {
+        if (n == -2 && negative != 0x21) wheels_ok = 0; /* not on this car: OBD speed only */
+        return 1;
+    }
+    for (i = 0; i < 4; ++i) w[i] = ((int)(reply[3 + 2 * i] * 256u + reply[4 + 2 * i]) - 0x7fff) * WHEEL_KPH;
+    hub_wheels(w, &wheel_front, &wheel_driven);
+    if (wheel_front < .3) wheel_front = 0; /* standing still */
+    wheel_time = bd_mono_ms();
+    return 1;
+}
+
+/* --- FuelBlend: tank level */
+static double fuel_pct;
+static uint64_t fuel_time;
+static int read_fuel(void) {
+    static const unsigned char req[] = {0x01, 0x2f}, prefix[] = {0x41, 0x2f};
+    unsigned char reply[8];
+    unsigned negative;
+    int n = hub_read(0x12, req, 2, prefix, 2, reply, sizeof reply, &negative);
+    if (n == -1) return 0;
+    if (n == 3) { fuel_pct = reply[2] * 100 / 255.0; fuel_time = bd_mono_ms(); }
+    return 1;
+}
+
 /* 22 F186 -> 62 F1 86 <session>. 01 = default. Anything else: another tester. */
 static int guard_supported = 1;
 static int check_session(void) {
@@ -341,15 +488,71 @@ static void send_temps(int sock, struct sockaddr_in *dest, int paused) {
     sendto(sock, &t, sizeof t, 0, (struct sockaddr *)dest, sizeof *dest);
 }
 
+static int32_t fixed(double v, double scale, uint64_t seen, uint64_t now, uint64_t stale) {
+    double x;
+    if (!seen || now - seen > stale) return HUB_NONE;
+    x = v * scale;
+    return (int32_t)(x + (x < 0 ? -.5 : .5));
+}
+
+static void send_deck(int sock, struct sockaddr_in *dest, int paused) {
+    struct deck_frame d;
+    uint64_t now = bd_mono_ms();
+    d.sampled_ms = now;
+    d.oil_temp = d.torque = d.power = d.throttle = d.ethanol = HUB_NONE;
+    if (!paused) {
+        d.oil_temp = fixed(oil_c, 10, oil_time, now, TEMPS_STALE_MS);
+        d.torque = fixed(deck_torque, 10, deck_time, now, DECK_STALE_MS);
+        d.power = fixed(deck_torque * deck_rpm / 9549.3, 10, deck_time, now, DECK_STALE_MS);
+        d.throttle = fixed(deck_throttle, 10, deck_time, now, DECK_STALE_MS);
+        d.ethanol = fixed(ethanol_pct, 10, ethanol_time, now, 15000);
+    }
+    sendto(sock, &d, sizeof d, 0, (struct sockaddr *)dest, sizeof *dest);
+}
+
+static void send_gear(int sock, struct sockaddr_in *dest, int paused) {
+    struct gear_frame g;
+    uint64_t now = bd_mono_ms();
+    int fresh = !paused && gear_time && now - gear_time < GEAR_STALE_MS;
+    g.sampled_ms = now;
+    g.rpm = !paused && drive.sampled_ms && now - drive.sampled_ms < GEAR_STALE_MS && drive.rpm >= 0 ? drive.rpm : HUB_NONE;
+    g.turbine = fresh ? (int32_t)turbine_rpm : HUB_NONE;
+    g.gear = fresh ? gear_now : 0;
+    sendto(sock, &g, sizeof g, 0, (struct sockaddr *)dest, sizeof *dest);
+}
+
+static void send_fuel(int sock, struct sockaddr_in *dest, int paused) {
+    struct fuel_frame f;
+    uint64_t now = bd_mono_ms();
+    memset(&f, 0, sizeof f);
+    f.sampled_ms = now;
+    f.level = paused ? HUB_NONE : fixed(fuel_pct, 10, fuel_time, now, FUEL_STALE_MS);
+    sendto(sock, &f, sizeof f, 0, (struct sockaddr *)dest, sizeof *dest);
+}
+
+static void send_timer(int sock, struct sockaddr_in *dest) {
+    struct timer_frame t;
+    uint64_t now = bd_mono_ms();
+    int fresh = wheel_time && now - wheel_time < TIMER_FRAME_STALE_MS;
+    t.sampled_ms = fresh ? wheel_time : drive.sampled_ms;
+    t.kph = drive.sampled_ms && now - drive.sampled_ms < 1000 ? drive.kph : -1;
+    t.front = fresh ? (int32_t)(wheel_front * 100 + .5) : HUB_NONE;
+    t.driven = fresh ? (int32_t)(wheel_driven * 100 + .5) : HUB_NONE;
+    sendto(sock, &t, sizeof t, 0, (struct sockaddr *)dest, sizeof *dest);
+}
+
 int main(int argc, char **argv) {
     unsigned boost_port = BD_UDP_PORT, drive_port = DRIVE_PORT, control_port = hub_port, timer_out = timer_port,
-             temps_out = TEMPS_PORT;
+             temps_out = TEMPS_PORT, deck_out = DECK_PORT, gear_out = GEAR_PORT,
+             fuel_out = FUEL_PORT;
     unsigned cycles = 0, done = 0, i;
     int me = C_SHIFT, control = -1, out, explicit_client = 0;
     pid_t parent = getppid();
-    struct sockaddr_in boost_dest, drive_dest, timer_dest, temps_dest, control_dest;
-    uint64_t seen[C_TEMPS + 1] = {0}, next_beat = 0, due_fast = 0, due_slow = 0, due_trans = 0,
-             due_shift = 0, due_guard = 0, due_temps = 0, last_boost_frame = 0, last_temps_frame = 0;
+    struct sockaddr_in boost_dest, drive_dest, timer_dest, temps_dest, deck_dest, gear_dest, fuel_dest, control_dest;
+    uint64_t seen[C_LAST + 1] = {0}, next_beat = 0, due_fast = 0, due_slow = 0, due_trans = 0,
+             due_shift = 0, due_guard = 0, due_temps = 0, last_boost_frame = 0, last_temps_frame = 0,
+             due_deck = 0, due_gear = 0, due_wheels = 0, due_ethanol = 0, last_deck_frame = 0,
+             last_gear_frame = 0, due_fuel = 0, last_fuel_frame = 0;
 
     for (i = 1; i < (unsigned)argc; ++i) {
         if (!strcmp(argv[i], "--host") && i + 1 < (unsigned)argc && !gw_host) gw_host = argv[++i];
@@ -360,6 +563,9 @@ int main(int argc, char **argv) {
             else if (!strcmp(argv[i], "shift")) me = C_SHIFT;
             else if (!strcmp(argv[i], "timer")) me = C_TIMER;
             else if (!strcmp(argv[i], "temps")) me = C_TEMPS;
+            else if (!strcmp(argv[i], "deck")) me = C_DECK;
+            else if (!strcmp(argv[i], "gear")) me = C_GEAR;
+            else if (!strcmp(argv[i], "fuel")) me = C_FUEL;
             else return 2;
         }
         else if (!strcmp(argv[i], "--port") && i + 1 < (unsigned)argc) gw_port = number(argv[++i], 1, 65535);
@@ -372,6 +578,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--drive-port") && i + 1 < (unsigned)argc) drive_port = number(argv[++i], 1, 65535);
         else if (!strcmp(argv[i], "--timer-port") && i + 1 < (unsigned)argc) timer_out = number(argv[++i], 1, 65535);
         else if (!strcmp(argv[i], "--temps-port") && i + 1 < (unsigned)argc) temps_out = number(argv[++i], 1, 65535);
+        else if (!strcmp(argv[i], "--deck-port") && i + 1 < (unsigned)argc) deck_out = number(argv[++i], 1, 65535);
+        else if (!strcmp(argv[i], "--gear-port") && i + 1 < (unsigned)argc) gear_out = number(argv[++i], 1, 65535);
+        else if (!strcmp(argv[i], "--fuel-port") && i + 1 < (unsigned)argc) fuel_out = number(argv[++i], 1, 65535);
+        else if (!strcmp(argv[i], "--ethanol")) ethanol_on = 1;
         else if (!strcmp(argv[i], "--hub-port") && i + 1 < (unsigned)argc) control_port = number(argv[++i], 1, 65535);
         else if (!strcmp(argv[i], "--lock-port") && i + 1 < (unsigned)argc) lock_port = number(argv[++i], 1, 65535);
         else if (!strcmp(argv[i], "--guard-pause-ms") && i + 1 < (unsigned)argc) guard_pause_ms = number(argv[++i], 100, 600000);
@@ -379,7 +589,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--trace")) trace_hub = 1;
         else if (!strcmp(argv[i], "--no-trans")) {}
         else {
-            fprintf(stderr, "Usage: %s --host IPv4 [--session | --client boost|shift|timer|temps] [--port 6801] [--trace]\n", argv[0]);
+            fprintf(stderr, "Usage: %s --host IPv4 [--session | --client boost|shift|timer|temps|deck|gear|fuel] [--ethanol] [--port 6801] [--trace]\n", argv[0]);
             return 2;
         }
     }
@@ -391,6 +601,9 @@ int main(int argc, char **argv) {
     to_loopback(&drive_dest, drive_port);
     to_loopback(&timer_dest, timer_out);
     to_loopback(&temps_dest, temps_out);
+    to_loopback(&deck_dest, deck_out);
+    to_loopback(&gear_dest, gear_out);
+    to_loopback(&fuel_dest, fuel_out);
     to_loopback(&control_dest, control_port);
     memset(&frame, 0, sizeof frame);
     memset(&drive, 0, sizeof drive);
@@ -413,13 +626,19 @@ int main(int argc, char **argv) {
             char b[16];
             ssize_t k;
             while ((k = recv(control, b, sizeof b, 0)) > 0)
-                if (b[0] == C_BOOST || b[0] == C_SHIFT || b[0] == C_TIMER || b[0] == C_TEMPS) seen[(int)b[0]] = now;
+                if (b[0] == C_BOOST || b[0] == C_SHIFT || b[0] == C_TIMER || b[0] == C_TEMPS ||
+                    b[0] == C_DECK || b[0] == C_GEAR || b[0] == C_FUEL) seen[(int)b[0]] = now;
         }
         wanted = me;
         if (seen[C_BOOST] && now - seen[C_BOOST] < subscriber_ttl_ms) wanted |= C_BOOST;
         if (seen[C_SHIFT] && now - seen[C_SHIFT] < subscriber_ttl_ms) wanted |= C_SHIFT;
         if (seen[C_TIMER] && now - seen[C_TIMER] < subscriber_ttl_ms) wanted |= C_TIMER;
         if (seen[C_TEMPS] && now - seen[C_TEMPS] < subscriber_ttl_ms) wanted |= C_TEMPS;
+        if (seen[C_DECK] && now - seen[C_DECK] < subscriber_ttl_ms) wanted |= C_DECK;
+        if (seen[C_GEAR] && now - seen[C_GEAR] < subscriber_ttl_ms) wanted |= C_GEAR;
+        if (seen[C_FUEL] && now - seen[C_FUEL] < subscriber_ttl_ms) wanted |= C_FUEL;
+        if (wanted & C_DECK) wanted |= C_BOOST; /* the rebuilt BoostDeck also takes NBG3 frames */
+        if (wanted & C_GEAR) wanted |= C_SHIFT;
 
         if (now >= paused_until && gw < 0 && lock < 0 && trace_hub && paused_until)
             fprintf(stderr, "hub: resuming\n");
@@ -428,23 +647,40 @@ int main(int argc, char **argv) {
             if (guard_supported && now >= due_guard) {
                 due_guard = now + guard_period_ms;
                 sent = check_session();
+            } else if ((wanted & C_TIMER) && wheels_ok && now >= due_wheels) {
+                due_wheels = now + wheel_ms;
+                if ((sent = read_wheels()) && bd_mono_ms() >= paused_until && wheel_time)
+                    send_timer(out, &timer_dest);
             } else if ((wanted & (C_SHIFT | C_TIMER)) && now >= due_shift) {
-                due_shift = now + ((wanted & C_TIMER) ? timer_ms : shift_ms);
+                due_shift = now + ((wanted & C_SHIFT) ? shift_ms : wheels_ok ? timer_obd_ms : timer_ms);
                 if ((sent = read_shift()) && now >= paused_until) {
                     if (wanted & C_SHIFT)
                         sendto(out, &drive, sizeof drive, 0, (struct sockaddr *)&drive_dest, sizeof drive_dest);
-                    if (wanted & C_TIMER)
-                        sendto(out, &drive, sizeof drive, 0, (struct sockaddr *)&timer_dest, sizeof timer_dest);
+                    if ((wanted & C_TIMER) && !wheels_ok) send_timer(out, &timer_dest);
                 }
+            } else if ((wanted & C_GEAR) && now >= due_gear) {
+                due_gear = now + gear_ms;
+                sent = read_gear();
+            } else if ((wanted & C_FUEL) && now >= due_fuel) {
+                due_fuel = now + fuel_ms;
+                sent = read_fuel();
             } else if ((wanted & C_BOOST) && now >= due_slow) {
                 due_slow = now + boost_slow_ms;
-                sent = read_group(slow_dids, slow_slot, 3);
+                if (wanted & C_DECK) sent = read_group(deck_slow_dids, deck_slow_slot, 4);
+                else sent = read_group(slow_dids, slow_slot, 3);
             } else if ((wanted & C_TEMPS) && now >= due_temps) {
                 due_temps = now + temps_ms;
                 sent = read_group(temps_dids, temps_slot, 3);
             } else if ((wanted & (C_BOOST | C_TEMPS)) && now >= due_trans) {
                 due_trans = now + trans_ms;
                 sent = read_trans();
+            } else if ((wanted & C_DECK) && deck_obd_ok && now >= due_deck) {
+                due_deck = now + deck_ms;
+                sent = read_deck();
+            } else if ((wanted & C_DECK) && ethanol_on && now >= due_ethanol) {
+                int r = read_ethanol();
+                due_ethanol = now + (r < 0 ? ethanol_retry_ms : ethanol_ms);
+                sent = r != 0;
             } else if ((wanted & C_BOOST) && now >= due_fast) {
                 due_fast = now + boost_fast_ms;
                 sent = read_group(fast_dids, fast_slot, 5);
@@ -456,6 +692,18 @@ int main(int argc, char **argv) {
             if (now < paused_until) frame.valid = 0; /* paused: show gauges as unavailable */
             send_boost(out, &boost_dest);
             last_boost_frame = now;
+        }
+        if ((wanted & C_DECK) && now - last_deck_frame >= deck_ms) {
+            send_deck(out, &deck_dest, now < paused_until);
+            last_deck_frame = now;
+        }
+        if ((wanted & C_GEAR) && now - last_gear_frame >= gear_ms) {
+            send_gear(out, &gear_dest, now < paused_until);
+            last_gear_frame = now;
+        }
+        if ((wanted & C_FUEL) && now - last_fuel_frame >= 1000) {
+            send_fuel(out, &fuel_dest, now < paused_until);
+            last_fuel_frame = now;
         }
         if ((wanted & C_TEMPS) && now - last_temps_frame >= temps_ms) {
             send_temps(out, &temps_dest, now < paused_until);

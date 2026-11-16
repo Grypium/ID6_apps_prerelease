@@ -2,6 +2,8 @@
 #include "fuel_blend.h"
 #include "perf_timer.h"
 #include "engine_temps.h"
+#include "lockup.h"
+#include "hub_frames.h"
 #include <string.h>
 #include <math.h>
 #include <stdio.h>
@@ -146,6 +148,37 @@ int main(void) {
             puts("FAIL guide text"); ++failures;
         }
     }
-    if (!failures) puts("Apps: fuel blend math, performance timers and engine temps guide passed.");
+    /* ShiftDeck converter lockup: hysteresis, median of three, idle, no data. */
+    {
+        lk_state k;
+        char g[24], c[24];
+        memset(&k, 0, sizeof k);
+        lk_update(&k, 2000, 1700, 3, g, sizeof g, c, sizeof c);
+        CHECK(!strcmp(g, "Gear 3") && !strcmp(c, "Slip 300 rpm"), "slipping: %s / %s", g, c);
+        lk_update(&k, 2000, 1990, 3, g, sizeof g, c, sizeof c);
+        lk_update(&k, 2000, 1985, 3, g, sizeof g, c, sizeof c);
+        CHECK(!strcmp(c, "Locked"), "locks after two near-zero samples (median): %s", c);
+        lk_update(&k, 2000, 1500, 3, g, sizeof g, c, sizeof c);
+        CHECK(!strcmp(c, "Locked"), "one stray sample (rpm read at a different moment) ignored: %s", c);
+        lk_update(&k, 2000, 1940, 3, g, sizeof g, c, sizeof c);
+        CHECK(!strcmp(c, "Locked"), "hysteresis: 60 rpm still locked: %s", c);
+        lk_update(&k, 2200, 1900, 3, g, sizeof g, c, sizeof c);
+        lk_update(&k, 2200, 1900, 3, g, sizeof g, c, sizeof c);
+        CHECK(!strcmp(c, "Slip 300 rpm"), "unlocks: %s", c);
+        lk_update(&k, 700, 690, 1, g, sizeof g, c, sizeof c);
+        CHECK(!strcmp(c, "Open"), "idle: %s", c);
+        lk_update(&k, 1500, 1600, -1, g, sizeof g, c, sizeof c);
+        CHECK(!strcmp(g, "Reverse"), "reverse: %s", g);
+        lk_update(&k, LK_NONE, 1600, 4, g, sizeof g, c, sizeof c);
+        CHECK(!strcmp(c, "--") && !strcmp(g, "Gear 4"), "no rpm: %s", c);
+        CHECK(LK_NONE == HUB_NONE, "same no-data marker as the hub");
+    }
+    /* Wheel speeds: two slowest = fronts, two fastest = driven, sign ignored. */
+    {
+        double w[4] = {-30.5, 30.1, 41.0, -40.0}, front, driven;
+        hub_wheels(w, &front, &driven);
+        CHECK(fabs(front - 30.3) < 1e-9 && fabs(driven - 40.5) < 1e-9, "wheels %f %f", front, driven);
+    }
+    if (!failures) puts("Apps: fuel blend math, performance timers, engine temps guide, lockup and wheel speeds passed.");
     return failures != 0;
 }

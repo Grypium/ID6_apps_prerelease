@@ -5,7 +5,7 @@
 set -e
 P=/var/opt/hmi/data/ID5/Plugins; TS=$(date +%Y%m%d-%H%M%S); R=/var/opt/hmi/data/ID5/Removed-$TS/hub-prev
 SUM=$(sha256sum ~/nbt-hub/diag-hub-qnx | cut -d' ' -f1)
-FILES="BoostDeck/boostdeck-collector-qnx ShiftDeck/shift-deck-qnx PerfTimers/perf-hub-qnx EngineTemps/temps-hub-qnx"
+FILES="BoostDeck/boostdeck-collector-qnx ShiftDeck/shift-deck-qnx PerfTimers/perf-hub-qnx EngineTemps/temps-hub-qnx FuelBlend/fuel-hub-qnx"
 hu "cat > $P/.diag-hub-stage && chmod 755 $P/.diag-hub-stage" < ~/nbt-hub/diag-hub-qnx
 GOT=$(hu "cat $P/.diag-hub-stage" | sha256sum | cut -d' ' -f1)
 [ "$GOT" = "$SUM" ] || { echo "read-back mismatch; nothing changed"; hu "rm -f $P/.diag-hub-stage"; exit 1; }

@@ -2,12 +2,13 @@ CC ?= cc
 PYTHON ?= python3
 CFLAGS ?= -O2 -std=c99 -Wall -Wextra -Werror
 CORE = src/gauge_core.c
-HEADERS = src/gauge_core.h src/drive_frame.h src/diagnostic_lease.h
+HEADERS = src/gauge_core.h src/drive_frame.h src/diagnostic_lease.h src/temps_frame.h src/hub_frames.h
 .PHONY: assets test
 
 assets:
 	$(PYTHON) tools/make_bars.py
 	$(PYTHON) tools/make_drive_apps.py
+	$(PYTHON) tools/make_boostdeck.py
 
 build:
 	mkdir -p build
@@ -24,7 +25,7 @@ build/mhd-maps: src/collector.c $(CORE) $(HEADERS) | build
 build/diag-hub: src/collector.c src/diag_hub.c $(CORE) $(HEADERS) | build
 	$(CC) $(CFLAGS) -Isrc -DDIAG_HUB $(filter %collector.c,$^) $(CORE) -lm -o $@
 
-build/test-apps: tests/test_apps.c src/fuel_blend.h src/perf_timer.h src/engine_temps.h | build
+build/test-apps: tests/test_apps.c src/fuel_blend.h src/perf_timer.h src/engine_temps.h src/lockup.h src/hub_frames.h | build
 	$(CC) $(CFLAGS) -Isrc tests/test_apps.c -lm -o $@
 
 build/test-core: tests/test_core.c $(CORE) $(HEADERS) | build

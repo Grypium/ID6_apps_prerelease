@@ -21,6 +21,11 @@ VALUES = {0x4201: bytes.fromhex("63ca"), 0x4205: bytes.fromhex("37e5"),
           0x580F: bytes.fromhex("82"), 0xDA12: bytes.fromhex("008e"),
           0x56D7: bytes.fromhex("1169"), 0x586F: bytes.fromhex("09c1"),
           0x4300: bytes.fromhex("0bf8"), 0x4408: bytes.fromhex("0ef4")}
+WHEELS = [1000, 1010, 1300, 1290]  # raw - 0x7FFF: fronts slower (rear wheelspin)
+EGS = {0xDA12: bytes.fromhex("008e"), 0xDA2E: bytes.fromhex("0004"), 0xDA34: bytes.fromhex("0690"),
+       0xDA1D: b"".join((0x7FFF + w).to_bytes(2, "big") for w in WHEELS)}
+OBD = {0x0C: bytes([0x1A, 0xF8]), 0x0D: bytes([0x32]), 0x11: bytes([0x40]), 0x62: bytes([0xA5]),
+       0x63: bytes([0x02, 0x3B]), 0x2F: bytes([0x7B])}
 
 
 def exact(conn, n):
@@ -36,8 +41,8 @@ def exact(conn, n):
 class FakeGateway:
     """DME (0x12) and EGS (0x18) behind an HSFZ gateway."""
 
-    def __init__(self, multi=True, session=1):
-        self.multi, self.session = multi, session
+    def __init__(self, multi=True, session=1, egs_multi=True):
+        self.multi, self.session, self.egs_multi = multi, session, egs_multi
         self.requests = []          # (time, target, uds bytes)
         self.connections = 0
         self.open = 0
@@ -78,13 +83,20 @@ class FakeGateway:
                     return bytes([0x7F, 0x22, 0x31])
                 out += did.to_bytes(2, "big") + VALUES[did]
             return out
-        if target == 0x18 and uds == bytes([0x22, 0xDA, 0x12]):
-            return bytes([0x62, 0xDA, 0x12]) + VALUES[0xDA12]
+        if target == 0x18 and sid == 0x22:
+            dids = [int.from_bytes(uds[i:i + 2], "big") for i in range(1, len(uds), 2)]
+            if len(dids) > 1 and not self.egs_multi:
+                return bytes([0x7F, 0x22, 0x13])
+            out = b"\x62"
+            for did in dids:
+                if did not in EGS:
+                    return bytes([0x7F, 0x22, 0x31])
+                out += did.to_bytes(2, "big") + EGS[did]
+            return out
         if target == 0x12 and sid == 0x01:
-            data = {0x0C: bytes([0x1A, 0xF8]), 0x0D: bytes([0x32])}
             out = b"\x41"
             for pid in uds[1:]:
-                out += bytes([pid]) + data[pid]
+                out += bytes([pid]) + OBD[pid]
             return out
         return bytes([0x7F, sid, 0x11])
 
@@ -152,6 +164,7 @@ class HubTest(unittest.TestCase):
         self.procs = []
         self.hub_port, self.lock_port = free_udp_port(), free_udp_port()
         self.boost, self.drive, self.timer, self.temps = Sink(), Sink(), Sink(), Sink()
+        self.deck, self.gear, self.fuel = Sink(), Sink(), Sink()
 
     def tearDown(self):
         for p in self.procs:
@@ -162,13 +175,18 @@ class HubTest(unittest.TestCase):
         self.drive.close()
         self.timer.close()
         self.temps.close()
+        self.deck.close()
+        self.gear.close()
+        self.fuel.close()
 
     def start(self, gw, client, extra=()):
         """Starts one hub instance under its own sh parent (like a plugin)."""
         cmd = [BIN, "--host", "127.0.0.1", "--port", str(gw.port), "--client", client,
                "--hub-port", str(self.hub_port), "--lock-port", str(self.lock_port),
                "--boost-port", str(self.boost.port), "--drive-port", str(self.drive.port),
-               "--timer-port", str(self.timer.port), "--temps-port", str(self.temps.port), *extra]
+               "--timer-port", str(self.timer.port), "--temps-port", str(self.temps.port),
+               "--deck-port", str(self.deck.port), "--gear-port", str(self.gear.port),
+               "--fuel-port", str(self.fuel.port), *extra]
         parent = subprocess.Popen(["sh", "-c", '"$@" & wait', "sh", *cmd],
                                   stderr=subprocess.DEVNULL)
         self.procs.append(parent)
@@ -210,19 +228,95 @@ class HubTest(unittest.TestCase):
         self.assertTrue(fast and all(len(u) == 11 for u in fast))
         gw.close()
 
-    def test_timer_client_gets_speed_every_50_ms(self):
+    def timer_frames(self, since=0):
+        return [(t,) + struct.unpack("=Qiii4x", p) for t, p in self.timer.packets if t >= since]
+
+    def test_timer_client_gets_wheel_speeds(self):
         gw = FakeGateway()
-        self.start(gw, "boost")
-        time.sleep(0.3)
         self.start(gw, "timer")
         time.sleep(3)
-        frames = [(t,) + struct.unpack("=Qii", p) for t, p in self.timer.packets if t > self.timer.packets[0][0] + 1]
-        self.assertGreater(len(frames), 25, "about 20 speed samples a second")
+        first = self.timer.packets[0][0]
+        frames = self.timer_frames(first + 1)
+        self.assertGreater(len(frames), 20, "about 16 wheel-speed samples a second")
         gaps = [b[1] - a[1] for a, b in zip(frames, frames[1:])]
         self.assertLess(sorted(gaps)[len(gaps) // 2], 90, "median sample spacing")
-        self.assertEqual(frames[-1][3], 0x32)
-        self.assertEqual(gw.max_open, 1)
+        _, _, kph, front, driven = frames[-1]
+        self.assertEqual(kph, 0x32, "OBD speed rides along")
+        self.assertEqual(front, round((1000 + 1010) / 2 * 0.01728 * 100))
+        self.assertEqual(driven, round((1300 + 1290) / 2 * 0.01728 * 100))
+        reqs = [t for t, _, _ in gw.requests if t > first + 1]
+        self.assertLessEqual(len(reqs) / (reqs[-1] - reqs[0]), 25, "within the rate ceiling")
         self.assertEqual(self.drive.packets, [], "nothing sent to ShiftDeck's port when it is not open")
+        gw.close()
+
+    def test_timer_falls_back_to_obd_speed(self):
+        gw = FakeGateway()
+        del EGS[0xDA1D]
+        try:
+            self.start(gw, "timer")
+            time.sleep(2.5)
+        finally:
+            EGS[0xDA1D] = b"".join((0x7FFF + w).to_bytes(2, "big") for w in WHEELS)
+        frames = self.timer_frames(self.timer.packets[0][0] + 1)
+        self.assertGreater(len(frames), 15, "OBD speed every 50 ms instead")
+        self.assertEqual(frames[-1][2], 0x32)
+        self.assertEqual(frames[-1][3], -2**31, "no wheel speeds")
+        wheel = [u for _, _, u in gw.requests if u == bytes([0x22, 0xDA, 0x1D])]
+        self.assertEqual(len(wheel), 1, "asked once, then stopped")
+        gw.close()
+
+    def test_deck_client_gets_torque_power_throttle_oil(self):
+        gw = FakeGateway()
+        self.start(gw, "deck")
+        time.sleep(3)
+        frames = [struct.unpack("=Qiiiii4x", p) for _, p in self.deck.packets]
+        self.assertGreaterEqual(len(frames), 7, "about three a second")
+        _, oil, torque, power, throttle, ethanol = frames[-1]
+        nm = (0xA5 - 125) / 100 * 571
+        self.assertAlmostEqual(torque, round(nm * 10), delta=1)
+        self.assertAlmostEqual(power, round(nm * (0x1AF8 / 4) / 9549.3 * 10), delta=1)
+        self.assertAlmostEqual(throttle, round(0x40 * 100 / 255 * 10), delta=1)
+        self.assertAlmostEqual(oil, round((0x0EF4 / 10 - 273.15) * 10), delta=1)
+        self.assertEqual(ethanol, -2**31, "no ethanol read without --ethanol")
+        self.assertGreater(len(self.boost_frames()), 10, "NBG3 frames for the dials too")
+        reqs = [u for _, _, u in gw.requests]
+        self.assertTrue(all(u[0] in (0x22, 0x01) for u in reqs), "read services only")
+        self.assertEqual(sum(1 for u in reqs if u[:2] == bytes([0x01, 0x0C]) and 0x63 in u[2:]), 1,
+                         "reference torque read once")
+        self.assertEqual(gw.max_open, 1)
+        gw.close()
+
+    def test_gear_client_gets_gear_and_turbine(self):
+        gw = FakeGateway()
+        self.start(gw, "gear")
+        time.sleep(2.5)
+        frames = [struct.unpack("=Qiii4x", p) for _, p in self.gear.packets]
+        self.assertGreaterEqual(len(frames), 8, "about five a second")
+        _, rpm, turbine, gear = frames[-1]
+        self.assertEqual((rpm, turbine, gear), (0x1AF8 // 4, 0x690, 4))
+        self.assertGreater(len(self.drive_frames()), 10, "ShiftDeck's rpm/speed frames too")
+        egs = [u for _, t, u in gw.requests if t == 0x18 and u[1:3] == bytes([0xDA, 0x2E])]
+        self.assertTrue(egs and all(len(u) == 5 for u in egs), "gear and turbine in one request")
+        gw.close()
+
+    def test_fuel_client_reads_tank_level_slowly(self):
+        gw = FakeGateway()
+        self.start(gw, "fuel")
+        time.sleep(4.5)
+        frames = [struct.unpack("=Qi4x", p) for _, p in self.fuel.packets]
+        self.assertGreaterEqual(len(frames), 3)
+        self.assertAlmostEqual(frames[-1][1], round(0x7B * 100 / 255 * 10), delta=1)
+        reqs = [u for _, _, u in gw.requests]
+        self.assertTrue(all(u in (bytes([0x01, 0x2F]), bytes([0x22, 0xF1, 0x86])) for u in reqs), reqs)
+        self.assertLessEqual(len(reqs), 6, "a request every two seconds plus the session check")
+        gw.close()
+
+    def test_gear_falls_back_to_single_egs_reads(self):
+        gw = FakeGateway(egs_multi=False)
+        self.start(gw, "gear")
+        time.sleep(3)
+        frames = [struct.unpack("=Qiii4x", p) for _, p in self.gear.packets]
+        self.assertEqual(frames[-1][2:], (0x690, 4))
         gw.close()
 
     def temps_frames(self):
