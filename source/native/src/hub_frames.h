@@ -19,13 +19,15 @@ struct deck_frame {
     int32_t ethanol;   /* 0.1 %, MHD active ethanol (only with --ethanol) */
 };
 
-/* ShiftDeck: gear and torque converter, five times a second. */
+/* ShiftDeck: gear and torque converter, ten frames a second. rpm and turbine
+   are a matched pair: engine rpm at the moment the turbine speed was read. */
 enum { GEAR_PORT = 42868, GEAR_STALE_MS = 1000 };
 struct gear_frame {
     uint64_t sampled_ms;
     int32_t rpm;       /* engine rpm (OBD 0C), HUB_NONE if unknown */
     int32_t turbine;   /* transmission input (turbine) rpm, EGS DA34 */
     int32_t gear;      /* 1..8, -1 reverse, 0 unknown (EGS DA2E) */
+    int32_t sample;    /* changes with each new rpm/turbine pair; frames repeat pairs */
 };
 
 /* PerfTimers: speed from the four wheel sensors (EGS DA1D), every 60 ms.

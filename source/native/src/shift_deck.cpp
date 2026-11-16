@@ -39,7 +39,9 @@ class ShiftDeck : public bmw::PluginApp {
     int socket_, gear_socket_;
     gear_frame gear_;
     lk_state lockup_;
-    char gear_text_[24], converter_text_[24];
+    char gear_text_[24], converter_text_[24], pair_text_[24];
+    int32_t last_sample_;
+    uint64_t pair_ms_;
     pid_t child_;
     unsigned generation_;
     bool visible_;
@@ -77,14 +79,30 @@ class ShiftDeck : public bmw::PluginApp {
         if (socket_>=0) { close(socket_); socket_=-1; }
         if (gear_socket_>=0) { close(gear_socket_); gear_socket_=-1; }
     }
+    // The hub repeats each rpm/turbine pair in several frames; the lockup logic
+    // takes each pair once. Converter state goes to "--" when no pair arrives.
     void showGear(uint64_t now) {
         char gear[24], converter[24];
         bool live=visible_ && gear_.sampled_ms && gear_.sampled_ms<=now && now-gear_.sampled_ms<GEAR_STALE_MS;
-        if (live) lk_update(&lockup_,gear_.rpm,gear_.turbine,gear_.gear,gear,sizeof gear,converter,sizeof converter);
-        else {
+        if (!live) {
             memset(&lockup_,0,sizeof lockup_);
+            last_sample_=0;
+            pair_ms_=0;
             strcpy(gear,"Gear --");
             strcpy(converter,"--");
+        } else {
+            lk_gear_text(gear_.gear,gear,sizeof gear);
+            if (gear_.sample && gear_.sample!=last_sample_) {
+                char ignored[24];
+                lk_update(&lockup_,gear_.rpm,gear_.turbine,gear_.gear,ignored,sizeof ignored,pair_text_,sizeof pair_text_);
+                last_sample_=gear_.sample;
+                pair_ms_=now;
+            }
+            if (pair_ms_ && now-pair_ms_<GEAR_STALE_MS) strcpy(converter,pair_text_);
+            else {
+                memset(&lockup_,0,sizeof lockup_);
+                strcpy(converter,"--");
+            }
         }
         if (strcmp(gear,gear_text_)) { label(kGearModel,gear); strcpy(gear_text_,gear); }
         if (strcmp(converter,converter_text_)) { label(kConverterModel,converter); strcpy(converter_text_,converter); }
@@ -202,7 +220,9 @@ public:
         memset(&frame_,0,sizeof frame_);
         memset(&gear_,0,sizeof gear_);
         memset(&lockup_,0,sizeof lockup_);
-        gear_text_[0]=converter_text_[0]=0;
+        gear_text_[0]=converter_text_[0]=pair_text_[0]=0;
+        last_sample_=0;
+        pair_ms_=0;
 #ifdef NATIVE_SHIFT_SMOOTH
         metric_=false;
         rpm_from_=0;
@@ -245,7 +265,9 @@ public:
             }
         }
         memset(&gear_,0,sizeof gear_);
-        gear_text_[0]=converter_text_[0]=0;
+        gear_text_[0]=converter_text_[0]=pair_text_[0]=0;
+        last_sample_=0;
+        pair_ms_=0;
         typedef bmw::Delegate<bool,const bmw::Parcel&> Action;
         Action action;
         action.m_obj=this;

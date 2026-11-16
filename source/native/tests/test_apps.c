@@ -148,7 +148,7 @@ int main(void) {
             puts("FAIL guide text"); ++failures;
         }
     }
-    /* ShiftDeck converter lockup: hysteresis, median of three, idle, no data. */
+    /* ShiftDeck converter lockup: hysteresis, slip must last three samples, idle, no data. */
     {
         lk_state k;
         char g[24], c[24];
@@ -157,14 +157,17 @@ int main(void) {
         CHECK(!strcmp(g, "Gear 3") && !strcmp(c, "Slip 300 rpm"), "slipping: %s / %s", g, c);
         lk_update(&k, 2000, 1990, 3, g, sizeof g, c, sizeof c);
         lk_update(&k, 2000, 1985, 3, g, sizeof g, c, sizeof c);
-        CHECK(!strcmp(c, "Locked"), "locks after two near-zero samples (median): %s", c);
+        CHECK(!strcmp(c, "Locked"), "locks on near-zero samples: %s", c);
         lk_update(&k, 2000, 1500, 3, g, sizeof g, c, sizeof c);
-        CHECK(!strcmp(c, "Locked"), "one stray sample (rpm read at a different moment) ignored: %s", c);
+        lk_update(&k, 4900, 4500, 3, g, sizeof g, c, sizeof c);
+        CHECK(!strcmp(c, "Locked"), "two-sample spike during a shift ignored: %s", c);
         lk_update(&k, 2000, 1940, 3, g, sizeof g, c, sizeof c);
         CHECK(!strcmp(c, "Locked"), "hysteresis: 60 rpm still locked: %s", c);
         lk_update(&k, 2200, 1900, 3, g, sizeof g, c, sizeof c);
         lk_update(&k, 2200, 1900, 3, g, sizeof g, c, sizeof c);
-        CHECK(!strcmp(c, "Slip 300 rpm"), "unlocks: %s", c);
+        CHECK(!strcmp(c, "Locked"), "two slipping samples are not enough: %s", c);
+        lk_update(&k, 2200, 1900, 3, g, sizeof g, c, sizeof c);
+        CHECK(!strcmp(c, "Slip 300 rpm"), "unlocks when slip lasts: %s", c);
         lk_update(&k, 700, 690, 1, g, sizeof g, c, sizeof c);
         CHECK(!strcmp(c, "Open"), "idle: %s", c);
         lk_update(&k, 1500, 1600, -1, g, sizeof g, c, sizeof c);

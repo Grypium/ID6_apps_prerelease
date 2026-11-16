@@ -408,8 +408,15 @@ static int read_ethanol(void) {
 /* --- EGS (0x18): gear, turbine speed, wheel speeds */
 static int egs_multi_ok = 1, wheels_ok = 1;
 static int32_t gear_now;
-static double turbine_rpm;
-static uint64_t gear_time, turbine_at; /* turbine_at: middle of the request that read it */
+/* Turbine speed history: each sample is paired with engine rpm at the same
+   moment once an rpm reading from after that moment is in. OBD rpm runs about
+   90 ms behind the engine (fitted on a drive log: in-gear |rpm - turbine| is
+   smallest at 80-100 ms), so the pair uses rpm reported 90 ms later. */
+enum { TURBINE_HISTORY = 6, RPM_LAG_MS = 90 };
+static double turbine_v[TURBINE_HISTORY];
+static uint64_t turbine_t[TURBINE_HISTORY];
+static unsigned turbine_n;
+static uint64_t gear_time;
 static double wheel_front, wheel_driven;
 static uint64_t wheel_time;
 
@@ -417,7 +424,11 @@ static void store_egs(unsigned did, const unsigned char *p, uint64_t sent) {
     unsigned w = p[0] * 256u + p[1];
     uint64_t now = bd_mono_ms();
     if (did == 0xda2e) { gear_now = w >= 1 && w <= 8 ? (int32_t)w : w == 0x0a ? -1 : 0; gear_time = now; }
-    else if (w < 16000) { turbine_rpm = w; turbine_at = (sent + now) / 2; } /* DA34 */
+    else if (w < 16000) { /* DA34 */
+        unsigned i = turbine_n++ % TURBINE_HISTORY;
+        turbine_v[i] = w;
+        turbine_t[i] = (sent + now) / 2;
+    }
 }
 
 static int read_gear(void) {
@@ -558,11 +569,25 @@ static void send_gear(int sock, struct sockaddr_in *dest, int paused) {
     struct gear_frame g;
     uint64_t now = bd_mono_ms();
     int fresh = !paused && gear_time && now - gear_time < GEAR_STALE_MS;
+    double rpm = -1;
+    unsigned k, have = turbine_n < TURBINE_HISTORY ? turbine_n : TURBINE_HISTORY;
+    uint64_t rpm_newest = rpm_hist_n ? rpm_hist_t[(rpm_hist_n - 1) % RPM_HISTORY] : 0;
     g.sampled_ms = now;
-    double rpm = fresh ? rpm_at(turbine_at) : -1;
-    /* rpm and turbine speed at the same instant (rpm interpolated to the turbine read) */
-    g.rpm = rpm >= 0 ? (int32_t)(rpm + 0.5) : HUB_NONE;
-    g.turbine = fresh ? (int32_t)turbine_rpm : HUB_NONE;
+    g.rpm = g.turbine = HUB_NONE;
+    g.sample = 0;
+    /* Newest turbine sample whose matching rpm (RPM_LAG_MS later) has been read. */
+    for (k = 0; fresh && k < have; ++k) {
+        unsigned id = turbine_n - 1 - k, i = id % TURBINE_HISTORY;
+        if (now - turbine_t[i] > 600) break;
+        if (turbine_t[i] + RPM_LAG_MS > rpm_newest) continue;
+        rpm = rpm_at(turbine_t[i] + RPM_LAG_MS);
+        if (rpm >= 0) {
+            g.rpm = (int32_t)(rpm + 0.5);
+            g.turbine = (int32_t)turbine_v[i];
+            g.sample = (int32_t)(id + 1);
+        }
+        break;
+    }
     g.gear = fresh ? gear_now : 0;
     sendto(sock, &g, sizeof g, 0, (struct sockaddr *)dest, sizeof *dest);
 }
@@ -776,7 +801,7 @@ int main(int argc, char **argv) {
             send_deck(out, &deck_dest, now < paused_until);
             last_deck_frame = now;
         }
-        if ((wanted & C_GEAR) && now - last_gear_frame >= gear_ms) {
+        if ((wanted & C_GEAR) && now - last_gear_frame >= gear_ms / 2) {
             send_gear(out, &gear_dest, now < paused_until);
             last_gear_frame = now;
         }

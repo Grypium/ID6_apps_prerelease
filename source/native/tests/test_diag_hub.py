@@ -104,13 +104,14 @@ class FakeGateway:
             for pid in uds[1:]:
                 value = OBD[pid]
                 if pid == 0x0C and self.ramp:
-                    value = int(self.ramp_rpm() * 4).to_bytes(2, "big")
+                    value = int(self.ramp_rpm(0.09) * 4).to_bytes(2, "big")
                 out += bytes([pid]) + value
             return out
         return bytes([0x7F, sid, 0x11])
 
-    def ramp_rpm(self):
-        return 1000 + (time.monotonic() - self.t0) * self.ramp % 4000
+    def ramp_rpm(self, lag=0.0):
+        # lag: the DME's OBD rpm describes the engine about 90 ms earlier
+        return 1000 + (time.monotonic() - lag - self.t0) * self.ramp % 4000
 
     def serve(self, conn):
         try:
@@ -304,9 +305,9 @@ class HubTest(unittest.TestCase):
         gw = FakeGateway()
         self.start(gw, "gear")
         time.sleep(2.5)
-        frames = [struct.unpack("=Qiii4x", p) for _, p in self.gear.packets]
+        frames = [struct.unpack("=Qiiii", p) for _, p in self.gear.packets]
         self.assertGreaterEqual(len(frames), 8, "about five a second")
-        _, rpm, turbine, gear = frames[-1]
+        _, rpm, turbine, gear, sample = frames[-1]
         self.assertEqual((rpm, turbine, gear), (0x1AF8 // 4, 0x690, 4))
         self.assertGreater(len(self.drive_frames()), 10, "ShiftDeck's rpm/speed frames too")
         egs = [u for _, t, u in gw.requests if t == 0x18 and u[1:3] == bytes([0xDA, 0x2E])]
@@ -331,32 +332,36 @@ class HubTest(unittest.TestCase):
         gw = FakeGateway(dme_delay=0.045)
         self.start(gw, "gear")
         time.sleep(3)
-        frames = [struct.unpack("=Qiii4x", p) for _, p in self.gear.packets]
-        self.assertTrue(frames and frames[-1][2:] == (0x690, 4), frames[-3:])
+        frames = [struct.unpack("=Qiiii", p) for _, p in self.gear.packets]
+        self.assertTrue(frames and frames[-1][2:4] == (0x690, 4), frames[-3:])
         self.assertGreater(len(self.drive_frames()), 10, "rpm frames keep coming")
         gw.close()
 
     def test_no_false_slip_while_rpm_climbs(self):
         # Locked converter during a pull: engine and turbine rise together at
         # 2000 rpm/s; the two reads are taken at different times, so the hub
-        # must line them up or ShiftDeck shows hundreds of rpm of slip.
+        # must line them up or ShiftDeck shows hundreds of rpm of slip. The fake
+        # DME also reports rpm 90 ms late, as the car's does.
         gw = FakeGateway(dme_delay=0.035, ramp=2000)
         self.start(gw, "gear")
         time.sleep(3)
-        frames = [struct.unpack("=Qiii4x", p) for _, p in self.gear.packets]
-        pairs = [(rpm, turbine) for _, rpm, turbine, _ in frames[3:] if rpm != -2**31 and turbine != -2**31
+        frames = [struct.unpack("=Qiiii", p) for _, p in self.gear.packets]
+        pairs = [(rpm, turbine) for _, rpm, turbine, _, _ in frames[3:] if rpm != -2**31 and turbine != -2**31
                  and 1100 < turbine < 4900]
         self.assertGreaterEqual(len(pairs), 5, frames[-5:])
         slips = sorted(abs(rpm - turbine) for rpm, turbine in pairs)
         self.assertLess(slips[len(slips) // 2], 40, slips)
+        samples = [f[4] for f in frames if f[4]]
+        self.assertEqual(samples, sorted(samples), "pair ids only go up")
+        self.assertGreaterEqual(len(set(samples)), 8, "a new pair about every 200 ms")
         gw.close()
 
     def test_gear_falls_back_to_single_egs_reads(self):
         gw = FakeGateway(egs_multi=False)
         self.start(gw, "gear")
         time.sleep(3)
-        frames = [struct.unpack("=Qiii4x", p) for _, p in self.gear.packets]
-        self.assertEqual(frames[-1][2:], (0x690, 4))
+        frames = [struct.unpack("=Qiiii", p) for _, p in self.gear.packets]
+        self.assertEqual(frames[-1][2:4], (0x690, 4))
         gw.close()
 
     def temps_frames(self):
