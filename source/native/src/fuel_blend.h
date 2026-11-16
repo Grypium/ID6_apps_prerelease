@@ -37,4 +37,19 @@ static inline fb_plan fb_solve(double capacity, double in_tank, double current, 
     return p;
 }
 
+/* Back-solves the pump E85's real ethanol content from a fill and the blend
+ * measured afterwards (ethanol sensor or test kit):
+ *   measured = (in_tank*before + e85_added*E + gas_added*gas) / (in_tank + e85_added + gas_added)
+ * Returns FB_EXACT with *e85 set, or FB_INVALID when the fill had too little E85
+ * (under min_e85) for a reliable answer or the result is implausible (outside 40..100). */
+static inline int fb_calibrate(double in_tank, double before, double e85_added, double gas_added,
+                               double gas, double measured, double min_e85, double *e85) {
+    double total = in_tank + e85_added + gas_added, e;
+    if (e85_added < min_e85 || e85_added <= 0 || total <= 0) return FB_INVALID;
+    e = (measured * total - in_tank * before - gas_added * gas) / e85_added;
+    if (e < 40 || e > 100) return FB_INVALID;
+    *e85 = e;
+    return FB_EXACT;
+}
+
 #endif

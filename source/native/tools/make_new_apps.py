@@ -93,10 +93,12 @@ def art(path, image_id, divider_x=None, highlight_last=False):
 
 
 # --- FuelBlend ---------------------------------------------------------------
-fb_actions = '      <hmiAction id="10" target="100" />\n      <hmiAction id="40" target="101" />\n' + \
-    "".join(f'      <raAction id="{a}" />\n' for a in range(21, 32))
+fb_actions = ('      <hmiAction id="10" target="100" />\n      <hmiAction id="40" target="101" />\n'
+              '      <hmiAction id="41" target="102" />\n' +
+              "".join(f'      <raAction id="{a}" />\n' for a in range(21, 39)))
 main = ['      <hmiState id="100" text="Fuel Blend">\n        <optionComponents>\n'
-        '          <button id="312" action="40" text="Pump settings" />\n        </optionComponents>\n'
+        '          <button id="312" action="40" text="Pump settings" />\n'
+        '          <button id="313" action="41" text="Calibrate E85" />\n        </optionComponents>\n'
         '        <components>\n', image(328), label(320, 80, 58, 20, 1067)]
 for i, y in enumerate(ROWS[:3]):  # tank level, blend now, target: - / + buttons
     main += [label(321 + i, 81 + i, 62, y, 740), button(341 + 2 * i, 21 + 2 * i, "-", 820, y, 130),
@@ -110,9 +112,19 @@ settings = ['      <hmiState id="101" parentId="100" text="Pump settings">\n    
 for i, y in enumerate(ROWS[:2]):  # E85 content, pump gas ethanol
     settings += [label(402 + i, 86 + i, 62, y, 740), button(411 + 2 * i, 28 + 2 * i, "-", 820, y, 130),
                  button(412 + 2 * i, 29 + 2 * i, "+", 970, y, 130)]
-settings.append('        </components>\n      </hmiState>\n')
+settings += [button(415, 41, "Calibrate E85 from last fill", 49, 370, 520, 52),
+             '        </components>\n      </hmiState>\n']
+# Calibration: E85 pumped, 91 pumped, measured blend (- / +), result, apply.
+calibrate = ['      <hmiState id="102" parentId="100" text="Calibrate E85">\n        <components>\n', image(500),
+             label(501, 89, 58, 20, 1067)]
+for i, y in enumerate(ROWS[:3]):
+    calibrate += [label(502 + i, 90 + i, 62, y, 740), button(511 + 2 * i, 32 + 2 * i, "-", 820, y, 130),
+                  button(512 + 2 * i, 33 + 2 * i, "+", 970, y, 130)]
+calibrate += [label(505, 93, 62, 284, 1040), button(520, 38, "Use this for my E85", 49, 370, 520, 52),
+              '        </components>\n      </hmiState>\n']
 (OUT / "FuelBlend.xml").write_text(app_xml("FuelBlend", "Fuel Blend", 212, 56900, fb_actions,
-                                            [80, 81, 82, 83, 84, 86, 87, 88], "".join(main + settings)))
+                                            [80, 81, 82, 83, 84, 86, 87, 88, 89, 90, 91, 92, 93],
+                                            "".join(main + settings + calibrate)))
 (OUT / "FuelBlend.manifest").write_text(manifest("FuelBlend", 114))
 art(OUT / "FuelBlend_ALL_Images.zip", 56900, highlight_last=True)
 

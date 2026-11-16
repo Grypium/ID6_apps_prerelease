@@ -69,6 +69,19 @@ int main(void) {
     p = fb_solve(13.7, 0, 0, 80, 80, 10);
     CHECK(p.status == FB_EXACT && fabs(p.e85_amount - 13.7) < 1e-9, "all e85 %f", p.e85_amount);
     CHECK(fb_solve(13.7, 2, 10, 30, 10, 10).status == FB_INVALID, "e85 must be richer than gas");
+    /* Calibration: plan with E80 assumed, but the pump's E85 was really E72. */
+    {
+        double e = 0, in_tank = 13.7 / 4;
+        fb_plan plan = fb_solve(13.7, in_tank, 30, 40, 80, 10);
+        double measured = (in_tank * 30 + plan.e85_amount * 72 + plan.gas_amount * 10) / 13.7;
+        CHECK(fb_calibrate(in_tank, 30, plan.e85_amount, plan.gas_amount, 10, measured, 1.5, &e) == FB_EXACT &&
+              fabs(e - 72) < 1e-9, "calibrated %f", e);
+        /* Round trip: re-planning with the calibrated value hits the target exactly. */
+        plan = fb_solve(13.7, in_tank, 30, 40, e, 10);
+        CHECK(fabs((in_tank * 30 + plan.e85_amount * 72 + plan.gas_amount * 10) / 13.7 - 40) < 1e-9, "round trip");
+        CHECK(fb_calibrate(in_tank, 30, 1.0, 9.0, 10, 33, 1.5, &e) == FB_INVALID, "too little E85 to tell");
+        CHECK(fb_calibrate(in_tank, 30, 5.0, 5.0, 10, 90, 1.5, &e) == FB_INVALID, "implausible result rejected");
+    }
 
     /* Timers against the exact profile, 40 random launches. */
     truth(&t60, &t100, &tq, &trap, &t60_130);

@@ -202,7 +202,10 @@ NBT_PW='<root password>' phone/hub/restore.sh <ts>
   gallons of E85 to pump first and then to fill with 91, and the blend you end up
   with (or the closest one if the target can't be reached on this fill). Pump
   settings: the E85's real ethanol content and the 91's. "I filled up" saves the
-  result as the new blend. Tank size is fixed at 13.7 gal (F22 M240i).
+  result as the new blend and records the fill. **Calibrate E85**: after a short
+  drive, set the blend measured (MHD ECA or a test kit) and what the pump showed;
+  the app works out the E85's real ethanol content and can use it from then on.
+  Tank size is fixed at 13.7 gal (F22 M240i).
 - **Perf Timers** (`perf_timers.cpp`, logic in `perf_timer.h`): 0-60 mph, 0-100 mph,
   1/4 mile (time and trap speed, estimated from speed) from a stop, and 60-130 mph
   rolling. It runs the shared hub as client `timer` (speed every 50 ms) only while
