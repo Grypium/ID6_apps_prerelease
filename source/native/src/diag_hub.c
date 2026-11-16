@@ -281,10 +281,47 @@ static int read_trans(void) {
 static int multi_pid_ok = 1;
 static struct drive_frame drive;
 
+/* Engine rpm history, so converter slip can compare engine and turbine speed
+   at the same instant: during a pull rpm climbs ~2000 rpm/s, and the two reads
+   are up to ~200 ms apart (that alone showed ~400 rpm of false slip). */
+enum { RPM_HISTORY = 6 };
+static double rpm_hist_v[RPM_HISTORY];
+static uint64_t rpm_hist_t[RPM_HISTORY];
+static unsigned rpm_hist_n;
+
+static void rpm_sample(int rpm, uint64_t sent, uint64_t answered) {
+    unsigned i = rpm_hist_n++ % RPM_HISTORY;
+    rpm_hist_v[i] = rpm;
+    rpm_hist_t[i] = (sent + answered) / 2;
+}
+
+/* Engine rpm at time t: interpolated between the samples around it, or
+   extrapolated from the last two by at most 120 ms. -1 if unknown. */
+static double rpm_at(uint64_t t) {
+    unsigned k, have = rpm_hist_n < RPM_HISTORY ? rpm_hist_n : RPM_HISTORY;
+    double v0, v1;
+    uint64_t t0, t1;
+    if (!have) return -1;
+    for (k = 1; k < have; ++k) { /* newest pair first */
+        unsigned a = (rpm_hist_n - 1 - k) % RPM_HISTORY, b = (rpm_hist_n - k) % RPM_HISTORY;
+        t0 = rpm_hist_t[a]; t1 = rpm_hist_t[b]; v0 = rpm_hist_v[a]; v1 = rpm_hist_v[b];
+        if (t1 <= t0 || t1 - t0 > 400) break;           /* gap in the history */
+        if (t >= t0 && t <= t1) return v0 + (v1 - v0) * (double)(t - t0) / (double)(t1 - t0);
+        if (k == 1 && t > t1) {
+            if (t - t1 > 120) return -1;
+            return v1 + (v1 - v0) * (double)(t - t1) / (double)(t1 - t0);
+        }
+    }
+    k = (rpm_hist_n - 1) % RPM_HISTORY;                 /* single fresh sample */
+    t1 = rpm_hist_t[k];
+    return (t >= t1 ? t - t1 : t1 - t) <= 60 ? rpm_hist_v[k] : -1;
+}
+
 static int read_shift(void) {
     unsigned char reply[16];
     unsigned negative;
     int n;
+    uint64_t sent = bd_mono_ms();
     drive.rpm = drive.kph = -1;
     if (multi_pid_ok) {
         static const unsigned char req[] = {0x01, 0x0c, 0x0d}, prefix[] = {0x41};
@@ -293,6 +330,7 @@ static int read_shift(void) {
         if (n == 6 && reply[1] == 0x0c && reply[4] == 0x0d) {
             drive.rpm = (int)(((unsigned)reply[2] * 256 + reply[3]) >> 2);
             drive.kph = reply[5];
+            rpm_sample(drive.rpm, sent, bd_mono_ms());
         } else if (!(n == -2 && paused_until > bd_mono_ms())) {
             multi_pid_ok = 0;
             if (trace_hub) fprintf(stderr, "hub: combined OBD read not accepted; separate reads\n");
@@ -302,7 +340,10 @@ static int read_shift(void) {
         static const unsigned char kq[] = {0x01, 0x0d}, kp[] = {0x41, 0x0d};
         n = hub_read(0x12, rq, 2, rp, 2, reply, sizeof reply, &negative);
         if (n == -1) return 0;
-        if (n == 4) drive.rpm = (int)(((unsigned)reply[2] * 256 + reply[3]) >> 2);
+        if (n == 4) {
+            drive.rpm = (int)(((unsigned)reply[2] * 256 + reply[3]) >> 2);
+            rpm_sample(drive.rpm, sent, bd_mono_ms());
+        }
         while (running && !may_send()) {
             if (bd_mono_ms() < paused_until) return 1;
             nap(5);
@@ -368,26 +409,28 @@ static int read_ethanol(void) {
 static int egs_multi_ok = 1, wheels_ok = 1;
 static int32_t gear_now;
 static double turbine_rpm;
-static uint64_t gear_time;
+static uint64_t gear_time, turbine_at; /* turbine_at: middle of the request that read it */
 static double wheel_front, wheel_driven;
 static uint64_t wheel_time;
 
-static void store_egs(unsigned did, const unsigned char *p) {
+static void store_egs(unsigned did, const unsigned char *p, uint64_t sent) {
     unsigned w = p[0] * 256u + p[1];
-    if (did == 0xda2e) { gear_now = w >= 1 && w <= 8 ? (int32_t)w : w == 0x0a ? -1 : 0; gear_time = bd_mono_ms(); }
-    else if (w < 16000) turbine_rpm = w; /* DA34 */
+    uint64_t now = bd_mono_ms();
+    if (did == 0xda2e) { gear_now = w >= 1 && w <= 8 ? (int32_t)w : w == 0x0a ? -1 : 0; gear_time = now; }
+    else if (w < 16000) { turbine_rpm = w; turbine_at = (sent + now) / 2; } /* DA34 */
 }
 
 static int read_gear(void) {
     unsigned char reply[32], req[5] = {0x22, 0xda, 0x2e, 0xda, 0x34}, prefix[3] = {0x62, 0xda, 0x2e};
     unsigned negative;
     int n;
+    uint64_t sent = bd_mono_ms();
     if (egs_multi_ok) {
         n = hub_read(0x18, req, 5, prefix, 3, reply, sizeof reply, &negative);
         if (n == -1) return 0;
         if (n == 9 && reply[5] == 0xda && reply[6] == 0x34) {
-            store_egs(0xda2e, reply + 3);
-            store_egs(0xda34, reply + 7);
+            store_egs(0xda2e, reply + 3, sent);
+            store_egs(0xda34, reply + 7, sent);
             return 1;
         }
         if (!(n == -2 && negative == 0x21)) {
@@ -398,15 +441,16 @@ static int read_gear(void) {
     }
     n = hub_read(0x18, req, 3, prefix, 3, reply, sizeof reply, &negative);
     if (n == -1) return 0;
-    if (n == 5) store_egs(0xda2e, reply + 3);
+    if (n == 5) store_egs(0xda2e, reply + 3, sent);
     while (running && !may_send()) {
         if (bd_mono_ms() < paused_until) return 1;
         nap(5);
     }
     req[2] = 0x34; prefix[2] = 0x34;
+    sent = bd_mono_ms();
     n = hub_read(0x18, req, 3, prefix, 3, reply, sizeof reply, &negative);
     if (n == -1) return 0;
-    if (n == 5) store_egs(0xda34, reply + 3);
+    if (n == 5) store_egs(0xda34, reply + 3, sent);
     return 1;
 }
 
@@ -515,7 +559,9 @@ static void send_gear(int sock, struct sockaddr_in *dest, int paused) {
     uint64_t now = bd_mono_ms();
     int fresh = !paused && gear_time && now - gear_time < GEAR_STALE_MS;
     g.sampled_ms = now;
-    g.rpm = !paused && drive.sampled_ms && now - drive.sampled_ms < GEAR_STALE_MS && drive.rpm >= 0 ? drive.rpm : HUB_NONE;
+    double rpm = fresh ? rpm_at(turbine_at) : -1;
+    /* rpm and turbine speed at the same instant (rpm interpolated to the turbine read) */
+    g.rpm = rpm >= 0 ? (int32_t)(rpm + 0.5) : HUB_NONE;
     g.turbine = fresh ? (int32_t)turbine_rpm : HUB_NONE;
     g.gear = fresh ? gear_now : 0;
     sendto(sock, &g, sizeof g, 0, (struct sockaddr *)dest, sizeof *dest);

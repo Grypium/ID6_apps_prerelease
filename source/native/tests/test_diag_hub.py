@@ -41,8 +41,10 @@ def exact(conn, n):
 class FakeGateway:
     """DME (0x12) and EGS (0x18) behind an HSFZ gateway."""
 
-    def __init__(self, multi=True, session=1, egs_multi=True, dme_delay=0.0):
+    def __init__(self, multi=True, session=1, egs_multi=True, dme_delay=0.0, ramp=None):
         self.multi, self.session, self.egs_multi = multi, session, egs_multi
+        self.ramp = ramp  # rpm per second: engine and turbine climb together (locked converter)
+        self.t0 = time.monotonic()
         self.dme_delay = dme_delay  # seconds before the DME answers (the car: ~30-50 ms)
         self.requests = []          # (time, target, uds bytes)
         self.connections = 0
@@ -92,14 +94,23 @@ class FakeGateway:
             for did in dids:
                 if did not in EGS:
                     return bytes([0x7F, 0x22, 0x31])
-                out += did.to_bytes(2, "big") + EGS[did]
+                value = EGS[did]
+                if did == 0xDA34 and self.ramp:
+                    value = int(self.ramp_rpm()).to_bytes(2, "big")
+                out += did.to_bytes(2, "big") + value
             return out
         if target == 0x12 and sid == 0x01:
             out = b"\x41"
             for pid in uds[1:]:
-                out += bytes([pid]) + OBD[pid]
+                value = OBD[pid]
+                if pid == 0x0C and self.ramp:
+                    value = int(self.ramp_rpm() * 4).to_bytes(2, "big")
+                out += bytes([pid]) + value
             return out
         return bytes([0x7F, sid, 0x11])
+
+    def ramp_rpm(self):
+        return 1000 + (time.monotonic() - self.t0) * self.ramp % 4000
 
     def serve(self, conn):
         try:
@@ -323,6 +334,21 @@ class HubTest(unittest.TestCase):
         frames = [struct.unpack("=Qiii4x", p) for _, p in self.gear.packets]
         self.assertTrue(frames and frames[-1][2:] == (0x690, 4), frames[-3:])
         self.assertGreater(len(self.drive_frames()), 10, "rpm frames keep coming")
+        gw.close()
+
+    def test_no_false_slip_while_rpm_climbs(self):
+        # Locked converter during a pull: engine and turbine rise together at
+        # 2000 rpm/s; the two reads are taken at different times, so the hub
+        # must line them up or ShiftDeck shows hundreds of rpm of slip.
+        gw = FakeGateway(dme_delay=0.035, ramp=2000)
+        self.start(gw, "gear")
+        time.sleep(3)
+        frames = [struct.unpack("=Qiii4x", p) for _, p in self.gear.packets]
+        pairs = [(rpm, turbine) for _, rpm, turbine, _ in frames[3:] if rpm != -2**31 and turbine != -2**31
+                 and 1100 < turbine < 4900]
+        self.assertGreaterEqual(len(pairs), 5, frames[-5:])
+        slips = sorted(abs(rpm - turbine) for rpm, turbine in pairs)
+        self.assertLess(slips[len(slips) // 2], 40, slips)
         gw.close()
 
     def test_gear_falls_back_to_single_egs_reads(self):
