@@ -643,48 +643,81 @@ int main(int argc, char **argv) {
         if (now >= paused_until && gw < 0 && lock < 0 && trace_hub && paused_until)
             fprintf(stderr, "hub: resuming\n");
         if (may_send()) {
-            /* Earliest-due task first; guard and shift take precedence on ties. */
-            if (guard_supported && now >= due_guard) {
+            /* Earliest-due task first (the most overdue read goes next), list order on ties.
+               A fixed priority starved the gear read on the car: the DME's ~40 ms answers
+               stretch the request gap to the rpm period, so rpm was due on every turn. */
+            enum { T_NONE, T_GUARD, T_WHEELS, T_SHIFT, T_GEAR, T_FUEL, T_SLOW, T_TEMPS, T_TRANS,
+                   T_DECK, T_ETHANOL, T_FAST };
+            int task = T_NONE;
+            uint64_t best = 0;
+#define READY(t, cond, due) \
+            if ((cond) && now >= (due) && (task == T_NONE || (due) < best)) { task = (t); best = (due); }
+            READY(T_GUARD, guard_supported, due_guard)
+            READY(T_WHEELS, (wanted & C_TIMER) && wheels_ok, due_wheels)
+            READY(T_SHIFT, wanted & (C_SHIFT | C_TIMER), due_shift)
+            READY(T_GEAR, wanted & C_GEAR, due_gear)
+            READY(T_FUEL, wanted & C_FUEL, due_fuel)
+            READY(T_SLOW, wanted & C_BOOST, due_slow)
+            READY(T_TEMPS, wanted & C_TEMPS, due_temps)
+            READY(T_TRANS, wanted & (C_BOOST | C_TEMPS), due_trans)
+            READY(T_DECK, (wanted & C_DECK) && deck_obd_ok, due_deck)
+            READY(T_ETHANOL, (wanted & C_DECK) && ethanol_on, due_ethanol)
+            READY(T_FAST, wanted & C_BOOST, due_fast)
+#undef READY
+            switch (task) {
+            case T_GUARD:
                 due_guard = now + guard_period_ms;
                 sent = check_session();
-            } else if ((wanted & C_TIMER) && wheels_ok && now >= due_wheels) {
+                break;
+            case T_WHEELS:
                 due_wheels = now + wheel_ms;
                 if ((sent = read_wheels()) && bd_mono_ms() >= paused_until && wheel_time)
                     send_timer(out, &timer_dest);
-            } else if ((wanted & (C_SHIFT | C_TIMER)) && now >= due_shift) {
+                break;
+            case T_SHIFT:
                 due_shift = now + ((wanted & C_SHIFT) ? shift_ms : wheels_ok ? timer_obd_ms : timer_ms);
                 if ((sent = read_shift()) && now >= paused_until) {
                     if (wanted & C_SHIFT)
                         sendto(out, &drive, sizeof drive, 0, (struct sockaddr *)&drive_dest, sizeof drive_dest);
                     if ((wanted & C_TIMER) && !wheels_ok) send_timer(out, &timer_dest);
                 }
-            } else if ((wanted & C_GEAR) && now >= due_gear) {
+                break;
+            case T_GEAR:
                 due_gear = now + gear_ms;
                 sent = read_gear();
-            } else if ((wanted & C_FUEL) && now >= due_fuel) {
+                break;
+            case T_FUEL:
                 due_fuel = now + fuel_ms;
                 sent = read_fuel();
-            } else if ((wanted & C_BOOST) && now >= due_slow) {
+                break;
+            case T_SLOW:
                 due_slow = now + boost_slow_ms;
                 if (wanted & C_DECK) sent = read_group(deck_slow_dids, deck_slow_slot, 4);
                 else sent = read_group(slow_dids, slow_slot, 3);
-            } else if ((wanted & C_TEMPS) && now >= due_temps) {
+                break;
+            case T_TEMPS:
                 due_temps = now + temps_ms;
                 sent = read_group(temps_dids, temps_slot, 3);
-            } else if ((wanted & (C_BOOST | C_TEMPS)) && now >= due_trans) {
+                break;
+            case T_TRANS:
                 due_trans = now + trans_ms;
                 sent = read_trans();
-            } else if ((wanted & C_DECK) && deck_obd_ok && now >= due_deck) {
+                break;
+            case T_DECK:
                 due_deck = now + deck_ms;
                 sent = read_deck();
-            } else if ((wanted & C_DECK) && ethanol_on && now >= due_ethanol) {
+                break;
+            case T_ETHANOL: {
                 int r = read_ethanol();
                 due_ethanol = now + (r < 0 ? ethanol_retry_ms : ethanol_ms);
                 sent = r != 0;
-            } else if ((wanted & C_BOOST) && now >= due_fast) {
+                break;
+            }
+            case T_FAST:
                 due_fast = now + boost_fast_ms;
                 sent = read_group(fast_dids, fast_slot, 5);
                 if (cycles && ++done >= cycles) running = 0;
+                break;
             }
             (void)sent;
         }

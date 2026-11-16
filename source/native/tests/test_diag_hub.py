@@ -41,8 +41,9 @@ def exact(conn, n):
 class FakeGateway:
     """DME (0x12) and EGS (0x18) behind an HSFZ gateway."""
 
-    def __init__(self, multi=True, session=1, egs_multi=True):
+    def __init__(self, multi=True, session=1, egs_multi=True, dme_delay=0.0):
         self.multi, self.session, self.egs_multi = multi, session, egs_multi
+        self.dme_delay = dme_delay  # seconds before the DME answers (the car: ~30-50 ms)
         self.requests = []          # (time, target, uds bytes)
         self.connections = 0
         self.open = 0
@@ -116,6 +117,8 @@ class FakeGateway:
                     with self.lock:
                         self.requests.append((time.monotonic(), target, uds))
                     time.sleep(0.004)  # a quick DME
+                    if target == 0x12 and self.dme_delay:
+                        time.sleep(self.dme_delay)
                     reply = bytes([target, src]) + self.answer(target, uds)
                     conn.sendall(struct.pack(">IH", len(reply), 1) + reply)
         except (OSError, EOFError):
@@ -309,6 +312,17 @@ class HubTest(unittest.TestCase):
         reqs = [u for _, _, u in gw.requests]
         self.assertTrue(all(u in (bytes([0x01, 0x2F]), bytes([0x22, 0xF1, 0x86])) for u in reqs), reqs)
         self.assertLessEqual(len(reqs), 6, "a request every two seconds plus the session check")
+        gw.close()
+
+    def test_gear_not_starved_by_slow_dme(self):
+        # On the car the DME takes 30-50 ms, which stretches the request gap to
+        # about the rpm period; the gear read must still get its turn.
+        gw = FakeGateway(dme_delay=0.045)
+        self.start(gw, "gear")
+        time.sleep(3)
+        frames = [struct.unpack("=Qiii4x", p) for _, p in self.gear.packets]
+        self.assertTrue(frames and frames[-1][2:] == (0x690, 4), frames[-3:])
+        self.assertGreater(len(self.drive_frames()), 10, "rpm frames keep coming")
         gw.close()
 
     def test_gear_falls_back_to_single_egs_reads(self):
