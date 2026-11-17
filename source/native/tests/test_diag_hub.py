@@ -8,8 +8,10 @@ while another tester has the DME in a non-default session.
 import os
 import random
 import socket
+import shutil
 import struct
 import subprocess
+import tempfile
 import threading
 import time
 import unittest
@@ -194,6 +196,7 @@ class HubTest(unittest.TestCase):
         self.hub_port, self.lock_port = free_udp_port(), free_udp_port()
         self.boost, self.drive, self.timer, self.temps = Sink(), Sink(), Sink(), Sink()
         self.deck, self.gear, self.fuel = Sink(), Sink(), Sink()
+        self.tmp = tempfile.mkdtemp()
 
     def tearDown(self):
         for p in self.procs:
@@ -207,6 +210,7 @@ class HubTest(unittest.TestCase):
         self.deck.close()
         self.gear.close()
         self.fuel.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def start(self, gw, client, extra=()):
         """Starts one hub instance under its own sh parent (like a plugin)."""
@@ -378,6 +382,63 @@ class HubTest(unittest.TestCase):
         time.sleep(7)
         _, level, ethanol, source, _ = self.fuel_frames()[-1]
         self.assertEqual((ethanol, source), (550, 2))
+        gw.close()
+
+    def responder(self, tag):
+        """Fake HSFZ identification responder on 127.0.0.1 (UDP); returns (socket, port)."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.settimeout(0.2)
+        seen = []
+        stop = threading.Event()
+        self.addCleanup(stop.set)
+        self.addCleanup(sock.close)
+        def serve():
+            while not stop.is_set():
+                try:
+                    data, addr = sock.recvfrom(64)
+                except OSError:
+                    continue
+                seen.append(data)
+                body = b"DIAGADR" + tag + b"BMWMAC001122334455BMWVINTESTVIN0000000000"
+                sock.sendto(struct.pack(">IH", len(body), 0x11) + body, addr)
+        threading.Thread(target=serve, daemon=True).start()
+        return sock, sock.getsockname()[1], seen
+
+    def start_discovering(self, gw, responder_port, log):
+        cmd = [BIN, "--host", "127.0.0.2", "--port", str(gw.port), "--client", "fuel",
+               "--hub-port", str(self.hub_port), "--lock-port", str(self.lock_port),
+               "--fuel-port", str(self.fuel.port), "--discover", "127.0.0.1", str(responder_port), "--log", log]
+        parent = subprocess.Popen(["sh", "-c", '"$@" & wait', "sh", *cmd], stderr=subprocess.DEVNULL)
+        self.procs.append(parent)
+
+    def test_discovery_finds_moved_gateway(self):
+        # gateway-ip.txt points at an address nobody answers on (127.0.0.2); the
+        # identification broadcast finds the gateway at 127.0.0.1 and data flows.
+        gw = FakeGateway()
+        sock, port, seen = self.responder(b"10")
+        log = os.path.join(self.tmp, "hub.log")
+        self.start_discovering(gw, port, log)
+        time.sleep(4)
+        frames = self.fuel_frames()
+        self.assertTrue(frames and frames[-1][1] != -2**31, "tank level arrives via the discovered gateway")
+        self.assertTrue(seen and seen[0] == bytes([0, 0, 0, 0, 0, 0x11]), seen)
+        text = open(log).read()
+        self.assertIn("cannot connect to 127.0.0.2", text)
+        self.assertIn("discovery: gateway answered at 127.0.0.1", text)
+        self.assertIn("connected to 127.0.0.1", text)
+        self.assertNotIn("TESTVIN", text, "nothing from the reply is logged")
+        gw.close()
+
+    def test_discovery_ignores_head_unit_reply(self):
+        gw = FakeGateway()
+        sock, port, seen = self.responder(b"63")  # only the head unit answers
+        log = os.path.join(self.tmp, "hub.log")
+        self.start_discovering(gw, port, log)
+        time.sleep(3)
+        self.assertFalse([f for f in self.fuel_frames() if f[1] != -2**31])
+        self.assertIn("discovery: no gateway answered", open(log).read())
+        self.assertLessEqual(len(seen), 1, "one broadcast per five seconds")
         gw.close()
 
     def test_gear_not_starved_by_slow_dme(self):

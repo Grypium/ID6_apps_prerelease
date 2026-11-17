@@ -118,8 +118,122 @@ static void nap(uint64_t ms) {
 }
 
 /* --- gateway session state (owner only) */
-static const char *gw_host;
+static const char *gw_host;  /* from gateway-ip.txt: tried first */
 static unsigned gw_port = 6801;
+
+/* Gateway discovery, as dealer tools do it: when the configured address can't
+   be reached, broadcast the HSFZ vehicle identification request (UDP 6811,
+   control word 0x0011, no payload) and use whichever gateway answers
+   (DIAGADR10). The gateway picks its 169.254.x.x address itself, so it can
+   differ between starts. Read-only: nothing is sent to any ECU. Notable events
+   go to a small log on the head unit's RAM disk (no VIN or other reply data). */
+static char gw_found[16];            /* last address found by discovery */
+static const char *gw_now;           /* address in use: gw_found or gw_host */
+static const char *discover_addr = "169.254.255.255";
+static unsigned discover_port = 6811;
+static int discover_any = 0;         /* tests: accept a non-link-local responder */
+static const char *log_path = "/tmp/diag-hub.log";
+static uint64_t discover_due, connect_failures, last_logged_failure;
+static unsigned log_lines;
+
+static void hub_log(const char *fmt, const char *a, unsigned long long n) {
+    struct timespec t;
+    char line[160];
+    int at, more;
+    FILE *f;
+    if (!log_path[0] || log_lines >= 40) return; /* at most 40 lines per hub process */
+    clock_gettime(CLOCK_REALTIME, &t);
+    at = snprintf(line, sizeof line, "%lld: ", (long long)t.tv_sec);
+    if (at < 0 || at >= (int)sizeof line) return;
+    more = snprintf(line + at, sizeof line - at, fmt, a, n);
+    if (more < 0) return;
+    at += more;
+    if (at > (int)sizeof line - 2) at = (int)sizeof line - 2;
+    line[at++] = '\n';
+    /* One fwrite of the whole line: the compiler turns single-character writes
+       into fputc, which the car's libc import list doesn't otherwise need. */
+    f = fopen(log_path, "a");
+    if (f) { fwrite(line, 1, (size_t)at, f); fclose(f); }
+    ++log_lines;
+    if (trace_hub) fwrite(line, 1, (size_t)at, stderr);
+}
+
+/* Broadcasts one identification request; on a gateway reply copies its address
+   into gw_found and returns 1. Waits up to 1.5 s. */
+static int discover_gateway(void) {
+    static const unsigned char request[6] = {0, 0, 0, 0, 0, 0x11};
+    struct sockaddr_in to, from;
+    unsigned char reply[512];
+    int fd, on = 1, found = 0;
+    uint64_t deadline = bd_mono_ms() + 1500;
+    memset(&to, 0, sizeof to);
+    to.sin_family = AF_INET;
+    to.sin_port = htons((uint16_t)discover_port);
+    if (inet_pton(AF_INET, discover_addr, &to.sin_addr) != 1) return 0;
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return 0;
+    setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &on, sizeof on);
+    if (fcntl(fd, F_SETFL, O_NONBLOCK) < 0 ||
+        sendto(fd, request, sizeof request, 0, (struct sockaddr *)&to, sizeof to) != (ssize_t)sizeof request) {
+        close(fd);
+        return 0;
+    }
+    while (!found && running) {
+        socklen_t len = sizeof from;
+        ssize_t n;
+        uint64_t now = bd_mono_ms();
+        if (now >= deadline || !ready(fd, POLLIN, deadline)) break;
+        n = recvfrom(fd, reply, sizeof reply, 0, (struct sockaddr *)&from, &len);
+        if (n < 6 || reply[4] != 0 || reply[5] != 0x11) continue;
+        {
+            const unsigned char *ip = (const unsigned char *)&from.sin_addr.s_addr;
+            ssize_t i;
+            int gateway = 0;
+            for (i = 6; i + 9 <= n; ++i)
+                if (!memcmp(reply + i, "DIAGADR10", 9)) { gateway = 1; break; }
+            if (!gateway) continue; /* the head unit itself (DIAGADR63) also answers */
+            if (!discover_any && !(ip[0] == 169 && ip[1] == 254)) continue;
+            snprintf(gw_found, sizeof gw_found, "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+            found = 1;
+        }
+    }
+    close(fd);
+    return found;
+}
+
+/* Connects to the address in use; on failure tries discovery (at most every 5 s). */
+static int connect_gateway(void) {
+    int fd;
+    uint64_t now;
+    if (!gw_now) gw_now = gw_host;
+    fd = connect_gw(gw_now, gw_port);
+    if (fd >= 0) {
+        if (connect_failures) hub_log("connected to %s after %llu failed attempts", gw_now, connect_failures);
+        connect_failures = 0;
+        return fd;
+    }
+    ++connect_failures;
+    now = bd_mono_ms();
+    if (connect_failures == 1 || now - last_logged_failure >= 30000) {
+        hub_log("cannot connect to %s (%llu attempts so far)", gw_now, connect_failures);
+        last_logged_failure = now;
+    }
+    if (now < discover_due) return -1;
+    discover_due = now + 5000;
+    if (!discover_gateway()) {
+        hub_log("discovery: no gateway answered%s", "", 0);
+        return -1;
+    }
+    hub_log("discovery: gateway answered at %s", gw_found, 0);
+    if (strcmp(gw_found, gw_now) == 0) return -1; /* same address: it answers UDP but not TCP yet */
+    gw_now = gw_found;
+    fd = connect_gw(gw_now, gw_port);
+    if (fd >= 0) {
+        hub_log("connected to %s after %llu failed attempts", gw_now, connect_failures);
+        connect_failures = 0;
+    }
+    return fd;
+}
 static int gw = -1, lock = -1;
 static uint64_t last_request, paused_until, backoff_ms, avg_latency;
 static unsigned requests_sent;
@@ -145,7 +259,7 @@ static int may_send(void) {
     if (gw < 0) {
         lock = hub_reserve();
         if (lock < 0) { paused_until = now + 500; return 0; } /* a one-shot is running */
-        gw = connect_gw(gw_host, gw_port);
+        gw = connect_gateway();
         if (gw < 0) { pause_for(backoff_ms ? backoff_ms : 1000, "connect failed"); return 0; }
     }
     return 1;
@@ -680,6 +794,12 @@ int main(int argc, char **argv) {
             else return 2;
         }
         else if (!strcmp(argv[i], "--port") && i + 1 < (unsigned)argc) gw_port = number(argv[++i], 1, 65535);
+        else if (!strcmp(argv[i], "--discover") && i + 2 < (unsigned)argc) { /* tests: ADDR PORT, any responder */
+            discover_addr = argv[++i];
+            discover_port = number(argv[++i], 1, 65535);
+            discover_any = 1;
+        }
+        else if (!strcmp(argv[i], "--log") && i + 1 < (unsigned)argc) log_path = argv[++i];
         else if (!strcmp(argv[i], "--udp-port") && i + 1 < (unsigned)argc) {
             unsigned p = number(argv[++i], 1, 65535);
             if (me == C_BOOST) boost_port = p; else if (me == C_TIMER) timer_out = p;

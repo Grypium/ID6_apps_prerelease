@@ -12,6 +12,9 @@ getsockopt: bx lr
 .globl recv
 .type recv,%function
 recv: bx lr
+.globl recvfrom
+.type recvfrom,%function
+recvfrom: bx lr
 .globl send
 .type send,%function
 send: bx lr
