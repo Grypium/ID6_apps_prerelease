@@ -51,6 +51,7 @@ int *__get_errno_ptr(void);
 #define ERANGE       34    /* [ref] */
 #define EINPROGRESS 236    /* [ref] */
 #define EADDRINUSE  248    /* [doc] only selects a message string */
+#define ETIMEDOUT   260    /* [ref] upstream MOST worker compares pthread_cond_timedwait with 260 */
 
 /* ---- stdio ---- [ref] stderr is &_Stderr (80-byte FILE, copy-relocated) */
 typedef struct _Filet { unsigned char __opaque[80]; } FILE;
@@ -61,6 +62,8 @@ int fclose(FILE *);
 char *fgets(char *, int, FILE *);
 int fgetc(FILE *);
 int fprintf(FILE *, const char *, ...);
+int vfprintf(FILE *, const char *, va_list);
+int fputc(int, FILE *);
 int printf(const char *, ...);
 int snprintf(char *, size_t, const char *, ...);
 int puts(const char *);
@@ -145,8 +148,10 @@ int lstat(const char *, struct stat *);
 int rename(const char *, const char *);
 
 /* ---- signals ---- */
+#define SIGHUP   1    /* [ref] MOST worker pthread_sigmask set */
 #define SIGINT   2    /* [ref] */
 #define SIGPIPE 13    /* [ref] */
+#define SIGALRM 14    /* [ref] upstream diag_link_signals */
 #define SIGTERM 15    /* [ref] */
 #define SIG_IGN ((void (*)(int))1)  /* [ref] */
 #define SIG_DFL ((void (*)(int))0)  /* [doc] */
@@ -154,6 +159,19 @@ void (*signal(int, void (*)(int)))(int);
 int kill(pid_t, int);
 int sigemptyset(sigset_t *);
 int sigfillset(sigset_t *);
+int sigaddset(sigset_t *, int);
+/* [ref] upstream's qcc-built worker: 16 bytes, handler@0, flags@4, mask@8 */
+struct sigaction {
+    void (*sa_handler)(int);
+    int sa_flags;
+    sigset_t sa_mask;
+};
+int sigaction(int, const struct sigaction *, struct sigaction *);
+#define SIG_BLOCK   0   /* [ref] */
+#define SIG_UNBLOCK 1   /* [ref] */
+#define SIG_SETMASK 2   /* [doc] */
+int sigprocmask(int, const sigset_t *, sigset_t *);
+unsigned alarm(unsigned);
 
 /* ---- wait ---- */
 #define WNOHANG 0x40  /* [ref] */

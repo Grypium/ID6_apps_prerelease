@@ -192,3 +192,69 @@ errno: .space 4
 .globl memmove
 .type memmove,%function
 memmove: bx lr
+.globl dlopen
+.type dlopen,%function
+dlopen: bx lr
+.globl dlsym
+.type dlsym,%function
+dlsym: bx lr
+.globl dlerror
+.type dlerror,%function
+dlerror: bx lr
+.globl dlclose
+.type dlclose,%function
+dlclose: bx lr
+.globl pthread_create
+.type pthread_create,%function
+pthread_create: bx lr
+.globl pthread_join
+.type pthread_join,%function
+pthread_join: bx lr
+.globl pthread_mutex_init
+.type pthread_mutex_init,%function
+pthread_mutex_init: bx lr
+.globl pthread_mutex_lock
+.type pthread_mutex_lock,%function
+pthread_mutex_lock: bx lr
+.globl pthread_mutex_unlock
+.type pthread_mutex_unlock,%function
+pthread_mutex_unlock: bx lr
+.globl pthread_cond_broadcast
+.type pthread_cond_broadcast,%function
+pthread_cond_broadcast: bx lr
+.globl pthread_cond_init
+.type pthread_cond_init,%function
+pthread_cond_init: bx lr
+.globl pthread_cond_timedwait
+.type pthread_cond_timedwait,%function
+pthread_cond_timedwait: bx lr
+.globl pthread_condattr_destroy
+.type pthread_condattr_destroy,%function
+pthread_condattr_destroy: bx lr
+.globl pthread_condattr_init
+.type pthread_condattr_init,%function
+pthread_condattr_init: bx lr
+.globl pthread_condattr_setclock
+.type pthread_condattr_setclock,%function
+pthread_condattr_setclock: bx lr
+.globl pthread_sigmask
+.type pthread_sigmask,%function
+pthread_sigmask: bx lr
+.globl sigaddset
+.type sigaddset,%function
+sigaddset: bx lr
+.globl sigaction
+.type sigaction,%function
+sigaction: bx lr
+.globl sigprocmask
+.type sigprocmask,%function
+sigprocmask: bx lr
+.globl alarm
+.type alarm,%function
+alarm: bx lr
+.globl vfprintf
+.type vfprintf,%function
+vfprintf: bx lr
+.globl fputc
+.type fputc,%function
+fputc: bx lr

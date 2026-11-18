@@ -16,7 +16,9 @@
 #include <unistd.h>
 
 static volatile sig_atomic_t running = 1;
+#ifndef DIAG_HUB
 static void stop(int sig) { (void)sig; running = 0; }
+#endif
 
 static int ready(int fd, short events, uint64_t deadline) {
     struct pollfd p;

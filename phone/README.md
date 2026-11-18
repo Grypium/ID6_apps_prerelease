@@ -295,3 +295,19 @@ corrected for the ~90 ms lag of OBD rpm and only shown when it lasts three sampl
 - `pkill -f PATTERN` inside a `bash -c` whose own command line contains PATTERN kills
   that shell too; kill by PID.
 - The QNX shell over SSH has no `LD_LIBRARY_PATH`; set it for system tools.
+
+## MOST fallback (no gateway)
+
+When neither the configured gateway address nor the identification broadcast
+answers, the hub falls back to upstream's MOST tunnel (`source/native/src/most`,
+see `source/docs/MOST.md`) after 5 failed connects. Only the DME answers there:
+BoostDeck's engine values, Engine Temps (oil, coolant, intake) and the tank
+level work; gear, converter slip, wheel speeds, gearbox temperature and the
+MHD ethanol read stay blank. Unlike upstream, the hub retries the gateway every
+30 s while on MOST and switches back when it appears (it can come up a minute
+after a cold start). `/tmp/diag-hub.log` records each switch. The plugins add
+`/opt/sys/lib` to the hub's library path for the DSI library.
+
+The kit's pthread, dlopen and sigaction definitions were checked against
+upstream's qcc-built worker (mutex/cond 8 bytes, RTLD_NOW|RTLD_GLOBAL = 0x102,
+ETIMEDOUT 260, CLOCK_MONOTONIC 2, 16-byte sigaction, SIG_UNBLOCK 1).

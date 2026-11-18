@@ -74,7 +74,19 @@ worker shift-deck-qnx "-DNATIVE_FAST -DSHIFT_DECK_ONLY" "-DPERF_LAB"
 # Shared read-only diagnostic hub; installed as both boostdeck-collector-qnx and
 # shift-deck-qnx for the official plugins, so gauge_core is built without
 # PERF_LAB (NBG3 frames, which the official BoostDeck plugin parses).
-[ -f "$SRC/src/diag_hub.c" ] && worker diag-hub-qnx "-DDIAG_HUB" ""
+# The hub also carries upstream's MOST tunnel fallback (src/most); its DSI
+# library is opened with dlopen only when the gateway cannot be reached.
+if [ -f "$SRC/src/diag_hub.c" ]; then
+  CC -fno-pic -I"$SRC/src" -DDIAG_HUB -c "$SRC/src/collector.c" -o "$O/diag-hub-qnx-collector.o"
+  CC -fno-pic -I"$SRC/src" -c "$SRC/src/gauge_core.c" -o "$O/diag-hub-qnx-core.o"
+  most=()
+  for f in "$SRC"/src/most/*.c; do
+    CC -fno-pic -I"$SRC/src" -c "$f" -o "$O/most-$(basename "$f" .c).o"
+    most+=("$O/most-$(basename "$f" .c).o")
+  done
+  ld.lld "${LDCOMMON[@]}" "${EXE[@]}" "$O/crt1.o" "$O/diag-hub-qnx-collector.o" "$O/diag-hub-qnx-core.o" "${most[@]}" \
+    "$O/helpers.o" "$O/uldivmod.o" "$O/note.o" -l:libm.so.2 -l:libsocket.so.3 -l:libc.so.3 -o "$OUT/diag-hub-qnx"
+fi
 # MHD flap control (2F 02 nn) for ExhaustFlap: the MHD worker with its PERF_LAB live controls.
 [ -f "$SRC/src/exhaust_flap.cpp" ] && worker exhaust-flap-qnx "-DMHD_MAPS_ONLY -DPERF_LAB" ""
 

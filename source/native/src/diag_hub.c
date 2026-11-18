@@ -34,6 +34,8 @@
 #include "drive_frame.h"
 #include "temps_frame.h"
 #include "hub_frames.h"
+#include "most/most_link.h"
+#include "most/dsi_client.h"
 
 enum {
     hub_port = 42864,          /* loopback control port: heartbeats */
@@ -248,6 +250,83 @@ static void pause_for(uint64_t ms, const char *why) {
     if (trace_hub) fprintf(stderr, "hub: pause %llu ms (%s)\n", (unsigned long long)ms, why);
 }
 
+/* MOST fallback (upstream's tunnel, src/most): when neither the configured
+   address nor discovery reaches the gateway - the gateway's Ethernet is off
+   with nothing powering the OBD activation line - the DME (only) is read
+   through the head unit's own UDS tunnel over MOST. Transmission reads
+   (gear, turbine, wheel speeds, gearbox temperature) stay blank there. Once
+   on MOST the hub stays on it; if the tunnel drops, the hub exits and the app
+   starts a new one. A DSI send has no timeout, so alarm() bounds each loop. */
+enum { MOST_AFTER_FAILS = 5, MOST_OPEN_MS = 2000, MOST_RETRY_MS = 30000, MOST_WAIT_MS = 2000,
+       MOST_WATCHDOG_S = 60, MOST_STOP_S = 15, HSFZ_PROBE_MS = 30000 };
+static int on_most, most_usable = 1, most_armed;
+static uint64_t most_retry_at, hsfz_probe_at;
+static const char *most_mode = "auto"; /* auto | hsfz | most */
+
+static void hub_stop(int sig) {
+    (void)sig;
+    if (running && most_armed) alarm(MOST_STOP_S); /* a DSI send has no timeout */
+    running = 0;
+}
+
+static void most_shutdown(void) {
+    if (!most_armed) return;
+    alarm(MOST_STOP_S);
+    if (most_close() == 0) alarm(0); else most_usable = 0;
+    on_most = 0;
+    most_armed = 0;
+}
+
+static int open_most(void) {
+    enum most_open_rc rc;
+    most_armed = 1;
+    alarm(MOST_WATCHDOG_S);
+    dsi_client_set_name("diaghub");
+    most_set_running(&running);
+    rc = most_open(MOST_OPEN_MS);
+    if (rc == MOST_UP) { hub_log("using the MOST tunnel (DME only)%s", "", 0); return 1; }
+    hub_log("MOST open failed: %s", rc == MOST_NO_LIBRARY ? "no library" :
+            rc == MOST_NO_TARGET ? "no target" : "no server", 0);
+    if (rc == MOST_NO_LIBRARY) most_usable = 0;
+    alarm(MOST_STOP_S);
+    if (most_close() != 0) most_usable = 0;
+    if (running) alarm(0);
+    return 0;
+}
+
+/* Called after a failed connect: switch to MOST when it is time. */
+static int try_most(void) {
+    uint64_t now = bd_mono_ms();
+    if (!most_usable || !strcmp(most_mode, "hsfz") || !running || now < most_retry_at) return 0;
+    if (strcmp(most_mode, "most") && connect_failures < MOST_AFTER_FAILS) return 0;
+    if (open_most()) { on_most = 1; hsfz_probe_at = bd_mono_ms() + HSFZ_PROBE_MS; return 1; }
+    most_retry_at = bd_mono_ms() + MOST_RETRY_MS;
+    return 0;
+}
+
+/* One request over the tunnel, in hub_read's return convention. */
+static int most_exchange(unsigned ecu, const unsigned char *uds, unsigned n, const unsigned char *prefix,
+                         unsigned prefix_n, unsigned char *reply, unsigned size, unsigned *negative) {
+    size_t len = 0;
+    enum most_rc rc;
+    *negative = 0;
+    if (ecu != MOST_ECU_DME || n == 0 || n > 16) { *negative = 0x11; return -2; } /* not through the tunnel */
+    rc = most_request_wait(MOST_ECU_DME, uds, n, reply, size, &len, MOST_WAIT_MS);
+    if (rc == MOST_CLOSED) {
+        hub_log("MOST tunnel lost; exiting so the app starts a new hub%s", "", 0);
+        running = 0;
+        return -1;
+    }
+    if (rc == MOST_TIMEOUT) return -1;
+    if (rc != MOST_REPLY) { *negative = 0x31; return -2; }
+    if (len >= 3 && reply[0] == 0x7f) {
+        *negative = reply[2];
+        return -2;
+    }
+    if (len < prefix_n || memcmp(reply, prefix, prefix_n)) { *negative = 0x10; return -2; }
+    return (int)len;
+}
+
 /* Ready to send one request now? Connects lazily and enforces the gap. */
 static int may_send(void) {
     uint64_t now = bd_mono_ms(), gap;
@@ -256,10 +335,33 @@ static int may_send(void) {
     gap = min_gap_ms;
     if (avg_latency * 2 > gap) gap = avg_latency * 2;
     if (now < last_request + gap) return 0;
+    /* On MOST, look for the gateway every 30 s (it can appear a minute after a
+       cold start) and go back to the full-speed link with the transmission. */
+    if (on_most && strcmp(most_mode, "most") && now >= hsfz_probe_at) {
+        int fd = connect_gateway();
+        hsfz_probe_at = bd_mono_ms() + HSFZ_PROBE_MS;
+        if (fd >= 0) {
+            hub_log("gateway reachable again; leaving the MOST tunnel%s", "", 0);
+            most_shutdown();
+            if (!most_usable) { close(fd); running = 0; return 0; } /* DSI would not stop: restart clean */
+            if (lock < 0) lock = hub_reserve();
+            if (lock < 0) { close(fd); paused_until = now + 500; return 0; }
+            gw = fd;
+            return 1;
+        }
+    }
+    if (on_most) {
+        if (lock < 0) {
+            lock = hub_reserve();
+            if (lock < 0) { paused_until = now + 500; return 0; }
+        }
+        return 1;
+    }
     if (gw < 0) {
         lock = hub_reserve();
         if (lock < 0) { paused_until = now + 500; return 0; } /* a one-shot is running */
-        gw = connect_gateway();
+        gw = strcmp(most_mode, "most") ? connect_gateway() : -1;
+        if (gw < 0 && try_most()) return 1;
         if (gw < 0) { pause_for(backoff_ms ? backoff_ms : 1000, "connect failed"); return 0; }
     }
     return 1;
@@ -280,7 +382,8 @@ static int hub_read_ex(unsigned ecu, const unsigned char *uds, unsigned n, const
     int rc;
     last_request = start;
     ++requests_sent;
-    rc = exchange(gw, ecu, uds, n, prefix, prefix_n, reply, size, request_timeout_ms, negative);
+    rc = on_most ? most_exchange(ecu, uds, n, prefix, prefix_n, reply, size, negative)
+                 : exchange(gw, ecu, uds, n, prefix, prefix_n, reply, size, request_timeout_ms, negative);
     took = bd_mono_ms() - start;
     last_request = bd_mono_ms();
     avg_latency = (avg_latency * 7 + took) >> 3;
@@ -800,6 +903,10 @@ int main(int argc, char **argv) {
             discover_any = 1;
         }
         else if (!strcmp(argv[i], "--log") && i + 1 < (unsigned)argc) log_path = argv[++i];
+        else if (!strcmp(argv[i], "--transport") && i + 1 < (unsigned)argc) {
+            most_mode = argv[++i];
+            if (strcmp(most_mode, "auto") && strcmp(most_mode, "hsfz") && strcmp(most_mode, "most")) return 2;
+        }
         else if (!strcmp(argv[i], "--udp-port") && i + 1 < (unsigned)argc) {
             unsigned p = number(argv[++i], 1, 65535);
             if (me == C_BOOST) boost_port = p; else if (me == C_TIMER) timer_out = p;
@@ -831,7 +938,16 @@ int main(int argc, char **argv) {
         }
     }
     if (!gw_host || parent <= 1) return 2;
-    signal(SIGINT, stop); signal(SIGTERM, stop); signal(SIGPIPE, SIG_IGN);
+    {
+        struct sigaction sa;
+        sigset_t alarm_set;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_handler = hub_stop;
+        sigaction(SIGINT, &sa, 0); sigaction(SIGTERM, &sa, 0);
+        signal(SIGPIPE, SIG_IGN); signal(SIGALRM, SIG_DFL); /* the MOST watchdog kills a stuck hub */
+        sigemptyset(&alarm_set); sigaddset(&alarm_set, SIGALRM);
+        sigprocmask(SIG_UNBLOCK, &alarm_set, 0);
+    }
     out = udp_socket(0, 0);
     if (out < 0) return 1;
     to_loopback(&boost_dest, boost_port);
@@ -979,9 +1095,11 @@ int main(int argc, char **argv) {
             send_temps(out, &temps_dest, now < paused_until);
             last_temps_frame = now;
         }
+        if (on_most) alarm(running ? MOST_WATCHDOG_S : MOST_STOP_S);
         nap(gw >= 0 ? 5 : 20);
     }
     disconnect();
+    most_shutdown();
     if (control >= 0) close(control);
     close(out);
     if (trace_hub) fprintf(stderr, "hub: exit after %u requests\n", requests_sent);

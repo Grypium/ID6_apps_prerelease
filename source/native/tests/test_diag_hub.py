@@ -44,7 +44,7 @@ class FakeGateway:
     """DME (0x12) and EGS (0x18) behind an HSFZ gateway."""
 
     def __init__(self, multi=True, session=1, egs_multi=True, dme_delay=0.0, ramp=None, obd_ethanol=None,
-                 mhd_ethanol=None):
+                 mhd_ethanol=None, port=0):
         self.multi, self.session, self.egs_multi = multi, session, egs_multi
         self.ramp = ramp  # rpm per second: engine and turbine climb together (locked converter)
         self.obd_ethanol, self.mhd_ethanol = obd_ethanol, mhd_ethanol  # raw A for 01 52 / byte 17 of 6C 88
@@ -57,7 +57,7 @@ class FakeGateway:
         self.lock = threading.Lock()
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server.bind(("127.0.0.1", 0))
+        self.server.bind(("127.0.0.1", port))
         self.server.listen(4)
         self.port = self.server.getsockname()[1]
         self.stopped = False
@@ -180,6 +180,14 @@ class Sink:
     def close(self):
         self.stopped = True
         self.sock.close()
+
+
+def free_tcp_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
 
 
 def free_udp_port():
@@ -439,6 +447,51 @@ class HubTest(unittest.TestCase):
         self.assertFalse([f for f in self.fuel_frames() if f[1] != -2**31])
         self.assertIn("discovery: no gateway answered", open(log).read())
         self.assertLessEqual(len(seen), 1, "one broadcast per five seconds")
+        gw.close()
+
+    def gear_frames(self):
+        return [struct.unpack("=Qiiii", p) for _, p in self.gear.packets]
+
+    def start_most(self, port, log, client="boost", mode="auto"):
+        """A hub whose gateway address has nobody listening, with the fake MOST tunnel up."""
+        cmd = [BIN, "--host", "127.0.0.1", "--port", str(port), "--client", client,
+               "--hub-port", str(self.hub_port), "--lock-port", str(self.lock_port),
+               "--boost-port", str(self.boost.port), "--gear-port", str(self.gear.port),
+               "--discover", "127.0.0.1", str(free_udp_port()), "--log", log, "--transport", mode]
+        env = dict(os.environ, ID6_FAKE_MOST="up")
+        parent = subprocess.Popen(["sh", "-c", '"$@" & wait', "sh", *cmd], stderr=subprocess.DEVNULL, env=env)
+        self.procs.append(parent)
+
+    def test_most_fallback_reads_the_dme_without_a_gateway(self):
+        log = os.path.join(self.tmp, "hub.log")
+        self.start_most(free_tcp_port(), log)
+        time.sleep(11)
+        text = open(log).read()
+        self.assertIn("using the MOST tunnel (DME only)", text)
+        frames = self.boost_frames()
+        self.assertTrue(frames, "BoostDeck frames arrive over MOST")
+        self.assertTrue(any(v > 0 for v in frames[-1][2]), "with live DME values")
+
+    def test_hsfz_only_never_opens_most(self):
+        log = os.path.join(self.tmp, "hub.log")
+        self.start_most(free_tcp_port(), log, mode="hsfz")
+        time.sleep(9)
+        self.assertNotIn("MOST", open(log).read())
+        self.assertFalse([f for f in self.boost_frames() if any(v > 0 for v in f[2])])
+
+    def test_leaves_most_when_the_gateway_appears(self):
+        # Cold start: the gateway shows up a while after the hub went to MOST.
+        port = free_tcp_port()
+        log = os.path.join(self.tmp, "hub.log")
+        self.start_most(port, log, client="gear")
+        time.sleep(10)
+        self.assertIn("using the MOST tunnel", open(log).read())
+        self.assertFalse([g for g in self.gear_frames() if g[3] > 0], "no gear over MOST")
+        gw = FakeGateway(port=port)
+        time.sleep(33)
+        self.assertIn("leaving the MOST tunnel", open(log).read())
+        self.assertTrue([g for g in self.gear_frames() if g[3] > 0], "gear back on the gateway")
+        self.assertTrue([u for _, t, u in gw.requests if t == 0x18], "EGS read over HSFZ")
         gw.close()
 
     def test_gear_not_starved_by_slow_dme(self):
