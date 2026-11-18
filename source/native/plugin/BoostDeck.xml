@@ -20,6 +20,9 @@
       <raAction id="48" />
       <raAction id="49" />
       <raAction id="59" />
+      <raAction id="120" />
+      <raAction id="121" />
+      <raAction id="122" />
     </actions>
     <models>
       <imageIdModel id="69" imageId="56300" />
@@ -57,6 +60,9 @@
           <button id="33" action="31" text="Gauge color" />
           <button id="410" action="49" text="Units: Imperial" />
           <button id="411" action="59" text="Units: Metric" />
+          <button id="412" action="120" text="Show: Max" />
+          <button id="413" action="121" text="Show: Live" />
+          <button id="414" action="122" text="Reset max" />
         </optionComponents>
         <components>
           <image id="209" model="69">

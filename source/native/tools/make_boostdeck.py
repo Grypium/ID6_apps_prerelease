@@ -100,7 +100,7 @@ def layout():
     actions = ET.SubElement(app, 'actions')
     for identifier, target in ((10, 100), (31, 104)):
         ET.SubElement(actions, 'hmiAction', id=str(identifier), target=str(target))
-    for identifier in list(range(40, 40 + len(THEMES))) + [49, 59]:  # colors, imperial, metric
+    for identifier in list(range(40, 40 + len(THEMES))) + [49, 59, 120, 121, 122]:  # colors, units, max/live/reset
         ET.SubElement(actions, 'raAction', id=str(identifier))
     models = ET.SubElement(app, 'models')
     states = ET.SubElement(app, 'hmiStates')
@@ -109,6 +109,9 @@ def layout():
     button(options, 33, 31, 'Gauge color')
     button(options, 410, 49, 'Units: Imperial')
     button(options, 411, 59, 'Units: Metric')
+    button(options, 412, 120, 'Show: Max')
+    button(options, 413, 121, 'Show: Live')
+    button(options, 414, 122, 'Reset max')
     content = ET.SubElement(gauges, 'components')
     ET.SubElement(models, 'imageIdModel', id='69', imageId=str(BACKGROUND))
     add_props(ET.SubElement(content, 'image', id='209', model='69'), BG_X, BG_Y, BG_W, BG_H, True)

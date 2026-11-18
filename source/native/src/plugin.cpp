@@ -95,6 +95,20 @@ class BoostDeck : public bmw::PluginApp {
     uint64_t deck_at_;
     char extra_labels_[kExtraCount][48];
     unsigned extra_images_[kExtraCount];
+#ifdef PERF_LAB
+    // Session peaks: the highest value each tile reached since BoostDeck was
+    // opened (a short hide, like the options menu, keeps them).
+    bool show_max_;
+    double peak_[kBarCount], extra_peak_[kExtraCount];
+    bool has_peak_[kBarCount], has_extra_peak_[kExtraCount];
+    uint64_t hidden_at_;
+    void resetPeaks() {
+        for (unsigned i=0;i<kBarCount;++i) has_peak_[i]=false;
+        for (unsigned i=0;i<kExtraCount;++i) has_extra_peak_[i]=false;
+    }
+    template <bool Max> bool showMax(const bmw::Parcel&) { show_max_=Max; refresh(); return true; }
+    bool clearPeaks(const bmw::Parcel&) { resetPeaks(); refresh(); return true; }
+#endif
     void postPoll();
     void refreshExtras();
 public:
@@ -107,6 +121,10 @@ public:
           metric_(false),
 #endif
           retry_at_(0), deck_fd_(-1) {
+#ifdef PERF_LAB
+        show_max_=false; hidden_at_=0;
+        resetPeaks();
+#endif
         resetDisplay();
     }
     virtual ~BoostDeck() { shutdown(); }
@@ -205,6 +223,12 @@ bool BoostDeck::onInit() {
     addHandler(49u,action);
     action.m_exec=&Action::execImpl<BoostDeck,&BoostDeck::changeUnits<true> >;
     addHandler(59u,action);
+    action.m_exec=&Action::execImpl<BoostDeck,&BoostDeck::showMax<true> >;
+    addHandler(120u,action);
+    action.m_exec=&Action::execImpl<BoostDeck,&BoostDeck::showMax<false> >;
+    addHandler(121u,action);
+    action.m_exec=&Action::execImpl<BoostDeck,&BoostDeck::clearPeaks>;
+    addHandler(122u,action);
 #endif
     selectColor(color_);
     bmw::Parcel visible(true);
@@ -223,9 +247,15 @@ bool BoostDeck::gaugeVisibility(const bmw::Parcel& event) {
     if (!event.readBool(visible) || gauges_visible_==visible) return true;
     gauges_visible_=visible;
     if (visible) {
+#ifdef PERF_LAB
+        if (hidden_at_ && bd_mono_ms()-hidden_at_>10000) resetPeaks(); /* a new session */
+#endif
         retry_at_=0;
         startVisibleCollector();
     } else {
+#ifdef PERF_LAB
+        hidden_at_=bd_mono_ms();
+#endif
         stopCollector();
         received_=0; deck_at_=0;
         memset(&frame_,0,sizeof frame_);
@@ -308,8 +338,21 @@ void BoostDeck::refresh() {
         char label[128];
         const DialScale& scale = kDialScales[i];
         unsigned image = kBarFirst;
+#ifdef PERF_LAB
+        const bool fresh = received_ && bd_is_fresh(&frame_,i,elapsed);
+        // AFR keeps its live value: its session high is just decel fuel cut.
+        const bool peak_tile = i!=BD_AFR;
+        if (fresh && peak_tile && (!has_peak_[i] || frame_.value[i]>peak_[i])) {
+            peak_[i]=frame_.value[i]; has_peak_[i]=true;
+        }
+        const bool max_shown = show_max_ && peak_tile;
+        if (max_shown ? has_peak_[i] : fresh) {
+            double x=max_shown ? peak_[i] : frame_.value[i];
+            const char *max_prefix = max_shown ? "Max " : "";
+#else
         if (received_ && bd_is_fresh(&frame_,i,elapsed)) {
             double x=frame_.value[i];
+#endif
             const char *unit_space = *scale.unit ? " " : "";
             double reading = bd_display_value(i,x,0);
             if (i==BD_BOOST && fabs(reading)<0.05) reading=0;
@@ -317,8 +360,8 @@ void BoostDeck::refresh() {
             if (metric_) {
                 const char* units=i==BD_AFR ? "" : i==BD_TIMING ? "deg" :
                     i==BD_IAT || i==BD_TRANS || i==BD_COOLANT ? "\260C" : "bar";
-                snprintf(label,sizeof label,"%.1f%s%s",bd_display_value(i,x,1),*units ? " " : "",units);
-            } else snprintf(label,sizeof label,i==BD_RAIL ? "%.0f%s%s" : "%.1f%s%s",reading,unit_space,scale.unit);
+                snprintf(label,sizeof label,"%s%.1f%s%s",max_prefix,bd_display_value(i,x,1),*units ? " " : "",units);
+            } else snprintf(label,sizeof label,i==BD_RAIL ? "%s%.0f%s%s" : "%s%.1f%s%s",max_prefix,reading,unit_space,scale.unit);
 #else
             const char *prefix = frame_.demo && i==BD_BOOST ? "Demo " : "";
             const char *format = i==BD_BOOST ? "%s%s   %+.1f%s%s"
@@ -379,8 +422,11 @@ void BoostDeck::refreshExtras() {
     for (unsigned i=0;i<kExtraCount;++i) {
         char label[48];
         unsigned image=kBarFirst;
-        if (live && raw[i]!=HUB_NONE) {
-            const double x=raw[i]/10.;
+        if (live && raw[i]!=HUB_NONE && (!has_extra_peak_[i] || raw[i]/10.>extra_peak_[i])) {
+            extra_peak_[i]=raw[i]/10.; has_extra_peak_[i]=true;
+        }
+        if (show_max_ ? has_extra_peak_[i] : live && raw[i]!=HUB_NONE) {
+            const double x=show_max_ ? extra_peak_[i] : raw[i]/10.;
             double imperial=x, shown=x;
             const char* format="%.0f %s";
             const char* unit="%";
@@ -390,7 +436,9 @@ void BoostDeck::refreshExtras() {
             case 2: format="%.0f%s"; break;
             default: imperial=x*1.8+32; shown=metric_ ? x : imperial; format="%.1f %s"; unit=metric_ ? "\260C" : "\260F";
             }
-            snprintf(label,sizeof label,format,shown,unit);
+            char value[40];
+            snprintf(value,sizeof value,format,shown,unit);
+            snprintf(label,sizeof label,"%s%s",show_max_ ? "Max " : "",value);
             double fraction=(imperial-kExtraScales[i].minimum)/(kExtraScales[i].maximum-kExtraScales[i].minimum);
             if (fraction<0) fraction=0;
             if (fraction>1) fraction=1;
