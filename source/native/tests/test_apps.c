@@ -57,6 +57,11 @@ int main(void) {
     unsigned seed;
     double worst60 = 0, worst100 = 0, worstq = 0, worst_roll = 0;
 
+    /* Tank level line: brim full at 83.1 %, the 2026-11-18 fill (9.0 gal from 23.4 %). */
+    CHECK(fabs(fb_level_gallons(83.1, 13.7) - 13.7) < 0.05, "full %f", fb_level_gallons(83.1, 13.7));
+    CHECK(fb_level_gallons(100, 13.7) == 13.7, "clamped to the tank");
+    CHECK(fabs(fb_level_gallons(23.36, 13.7) - 4.7) < 0.05, "before fill %f", fb_level_gallons(23.36, 13.7));
+    CHECK(fb_level_gallons(-20, 13.7) == 0, "never negative");
     /* Blend: 1/4 tank (3.425 of 13.7 gal) at E30, target E40, E85 really E80, pump gas E10. */
     p = fb_solve(13.7, 13.7 / 4, 30, 40, 80, 10);
     CHECK(p.status == FB_EXACT, "status %d", p.status);

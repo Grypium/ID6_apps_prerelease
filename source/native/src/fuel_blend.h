@@ -55,6 +55,17 @@ static inline int fb_calibrate(double in_tank, double before, double e85_added, 
 /* Ethanol sensor settling: a reading is "settled" once it has stayed within
  * FB_SETTLE_BAND for FB_SETTLE_MS. After a fill the sensor first reads the old
  * fuel still in the lines, then moves to the new blend. */
+/* OBD 2F (% of tank) on this F22 does not span the tank: brim full reads
+ * 83.1 %, and a fill of 9.0 gal (5.9 E85 + 3.1 gal 91) went in from a 23.4 %
+ * reading. A straight line through both points puts 0 % at about 1.2 gal
+ * still in the tank. Fitted from one fill (2026-11-18); refine with later ones. */
+#define FB_LEVEL_FULL_PCT 83.1
+#define FB_LEVEL_ZERO_PCT (-7.84)  /* where the line reaches an empty tank */
+static inline double fb_level_gallons(double pct, double tank) {
+    double g = tank * (pct - FB_LEVEL_ZERO_PCT) / (FB_LEVEL_FULL_PCT - FB_LEVEL_ZERO_PCT);
+    return g < 0 ? 0 : g > tank ? tank : g;
+}
+
 enum { FB_SETTLE_MS = 30000 };
 #define FB_SETTLE_BAND 1.5
 #define FB_SETTLE_USED 0.5 /* gallons burned since the fill before trusting the sensor */

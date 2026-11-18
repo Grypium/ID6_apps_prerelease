@@ -391,7 +391,7 @@ public:
             ssize_t n = recv(socket_, &f, sizeof f, 0);
             if (n <= 0) break;
             if (n != static_cast<ssize_t>(sizeof f) || !visible_ || f.sampled_ms > now) continue;
-            if (f.level != HUB_NONE && f.level >= 0 && f.level <= 1000) liveLevel(kTankGallons * f.level / 1000.0);
+            if (f.level != HUB_NONE && f.level >= 0 && f.level <= 1000) liveLevel(fb_level_gallons(f.level / 10.0, kTankGallons));
             if (f.ethanol != HUB_NONE && f.ethanol >= 0 && f.ethanol <= 1000) sensorReading(f.ethanol / 10.0);
         }
         bool was_live = live_at_ != 0;
