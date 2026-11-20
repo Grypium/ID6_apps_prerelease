@@ -26,6 +26,10 @@ TILE_W, TILE_H, COL_STEP, ROW_STEP = 240, 122, 258, 139
 ETHANOL_STEPS, ETHANOL_FIRST, BACKGROUND = 20, 56100, 56300
 ETHANOL_MULTI = '#80d6ff'
 TRACK, TILE, TITLE = '#242b36', (23, 27, 34, 255), (190, 204, 219, 255)
+# Session peak beside the title: tile index -> x offset in the tile, measured
+# from the titles in the installed background (each title's right edge + 10).
+# Transmission, rail and oil pressure titles leave no room; AFR shows no peak.
+PEAK_X = {0: 98, 2: 101, 3: 144, 7: 126, 8: 169, 9: 112, 10: 135, 11: 124}
 
 
 def tile_at(i):
@@ -124,6 +128,10 @@ def layout():
         x, y = BG_X + col * COL_STEP + 15, BG_Y + row * ROW_STEP
         add_props(ET.SubElement(content, 'image', id=str(bar_id), model=str(bar_model)), x, y + 97, 210, 15, True)
         add_props(label(content, label_id, text_model), x, y + 31, 216, 60)
+        if i in PEAK_X:  # text model 80+i, label 170+i
+            ET.SubElement(models, 'raDataModel', id=str(80 + i), modelType='Richtext')
+            px = BG_X + col * COL_STEP + PEAK_X[i]
+            add_props(label(content, 170 + i, 80 + i), px, y, BG_X + col * COL_STEP + 236 - px, 38)
     ET.SubElement(models, 'raDataModel', id='58', modelType='Richtext')
     ET.SubElement(models, 'imageIdModel', id='68', imageId=str(ETHANOL_FIRST))
     add_props(ET.SubElement(content, 'image', id='208', model='68'), 1106, 71, 40, 250, True)

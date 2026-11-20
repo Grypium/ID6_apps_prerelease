@@ -101,6 +101,16 @@ class BoostDeck : public bmw::PluginApp {
     bool show_max_;
     double peak_[kBarCount], extra_peak_[kExtraCount];
     bool has_peak_[kBarCount], has_extra_peak_[kExtraCount];
+    char peak_labels_[kBarCount + kExtraCount][24];
+    // The peak beside the title (text model 80+tile) on tiles with room for it.
+    static bool peakBeside(unsigned tile) {
+        return tile == 0 || tile == 2 || tile == 3 || tile == 7 || (tile >= 8 && tile < 12);
+    }
+    void showPeak(unsigned tile, const char* text) {
+        if (!peakBeside(tile) || !strcmp(peak_labels_[tile], text)) return;
+        updateModel(80u + tile, bmw::BasicString<char>(text));
+        snprintf(peak_labels_[tile], sizeof peak_labels_[tile], "%s", text);
+    }
     uint64_t hidden_at_;
     void resetPeaks() {
         for (unsigned i=0;i<kBarCount;++i) has_peak_[i]=false;
@@ -124,6 +134,7 @@ public:
 #ifdef PERF_LAB
         show_max_=false; hidden_at_=0;
         resetPeaks();
+        for (unsigned i=0;i<kBarCount+kExtraCount;++i) strcpy(peak_labels_[i],"-");
 #endif
         resetDisplay();
     }
@@ -346,6 +357,13 @@ void BoostDeck::refresh() {
             peak_[i]=frame_.value[i]; has_peak_[i]=true;
         }
         const bool max_shown = show_max_ && peak_tile;
+        {
+            char peak[24] = "";
+            if (peak_tile && has_peak_[i])
+                snprintf(peak,sizeof peak,i==BD_BOOST || i==BD_TIMING ? "%.1f" : "%.0f",
+                         bd_display_value(i,peak_[i],metric_ ? 1 : 0));
+            showPeak(i,peak);
+        }
         if (max_shown ? has_peak_[i] : fresh) {
             double x=max_shown ? peak_[i] : frame_.value[i];
             const char *max_prefix = max_shown ? "Max " : "";
@@ -424,6 +442,16 @@ void BoostDeck::refreshExtras() {
         unsigned image=kBarFirst;
         if (live && raw[i]!=HUB_NONE && (!has_extra_peak_[i] || raw[i]/10.>extra_peak_[i])) {
             extra_peak_[i]=raw[i]/10.; has_extra_peak_[i]=true;
+        }
+        {
+            char peak[24] = "";
+            if (has_extra_peak_[i]) {
+                const double v=extra_peak_[i];
+                const double shown=i==0 ? (metric_ ? v : v*1.34102) : i==1 ? (metric_ ? v : v*.737562)
+                                  : i==2 ? v : (metric_ ? v : v*1.8+32);
+                snprintf(peak,sizeof peak,"%.0f",shown);
+            }
+            showPeak(kBarCount+i,peak);
         }
         if (show_max_ ? has_extra_peak_[i] : live && raw[i]!=HUB_NONE) {
             const double x=show_max_ ? extra_peak_[i] : raw[i]/10.;
