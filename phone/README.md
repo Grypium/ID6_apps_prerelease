@@ -311,3 +311,13 @@ after a cold start). `/tmp/diag-hub.log` records each switch. The plugins add
 The kit's pthread, dlopen and sigaction definitions were checked against
 upstream's qcc-built worker (mutex/cond 8 bytes, RTLD_NOW|RTLD_GLOBAL = 0x102,
 ETIMEDOUT 260, CLOCK_MONOTONIC 2, 16-byte sigaction, SIG_UNBLOCK 1).
+
+### MOST on the car (2026-11-20)
+
+First run of the MOST fallback on this car (a test build with `-DMOST_ANY_ECU`,
+`--transport most --client temps`): the tunnel opened, DME reads took 70-90 ms
+(2 of 7 timed out at 2 s), and the hub shut DSI down cleanly. Transmission
+(0x18) requests were refused at once (outer NRC 31, ~75 ms) although the EGS
+answers the same DA12 read over HSFZ: the tunnel routes to the DME only.
+iDrive restart over SSH: `LD_LIBRARY_PATH=/lib:/usr/lib:/opt/sys/lib:/opt/core/lib
+/opt/core/bin/OnOffDSICommander appreset` (parked only; drops SSH).

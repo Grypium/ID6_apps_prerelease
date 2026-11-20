@@ -310,7 +310,11 @@ static int most_exchange(unsigned ecu, const unsigned char *uds, unsigned n, con
     size_t len = 0;
     enum most_rc rc;
     *negative = 0;
+#ifdef MOST_ANY_ECU /* test builds only: does the tunnel reach other ECUs? */
+    if (n == 0 || n > 16) { *negative = 0x11; return -2; }
+#else
     if (ecu != MOST_ECU_DME || n == 0 || n > 16) { *negative = 0x11; return -2; } /* not through the tunnel */
+#endif
     rc = most_request_wait(MOST_ECU_DME, uds, n, reply, size, &len, MOST_WAIT_MS);
     if (rc == MOST_CLOSED) {
         hub_log("MOST tunnel lost; exiting so the app starts a new hub%s", "", 0);
